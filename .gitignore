@@ -32,7 +32,6 @@ htmlcov/
 
 # Project-specific: geodata (too large for git)
 outputs/
-input_data_hamburg/
 Zenodo_v2_shared_cs3_data/
 data_backup_original/
 *.gdb/

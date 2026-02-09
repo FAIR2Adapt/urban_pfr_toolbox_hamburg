@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urban-pfr"
+version = "0.1.0"
+description = "City-independent pluvial flood risk assessment package"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "FAIR Solution 3 Team", email = "your.email@example.com"}
+]
+keywords = [
+    "flood risk",
+    "urban planning",
+    "GIS",
+    "pluvial flooding",
+    "climate adaptation",
+    "FAIR research"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: GIS",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "pandas>=1.3.0",
+    "geopandas>=0.10.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.4.0",
+    "pyyaml>=5.4.0",
+    "fiona>=1.8.0",
+    "shapely>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.12",
+    "black>=21.0",
+    "flake8>=3.9",
+    "sphinx>=4.0",
+]
+viz = [
+    "contextily>=1.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/urban-pfr"
+Documentation = "https://urban-pfr.readthedocs.io"
+Repository = "https://github.com/yourusername/urban-pfr"
+"Bug Tracker" = "https://github.com/yourusername/urban-pfr/issues"
+
+[tool.setuptools]
+packages = ["urban_pfr"]
+
+[tool.setuptools.package-data]
+urban_pfr = ["data/*.yaml"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

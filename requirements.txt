@@ -1,0 +1,21 @@
+# Core dependencies for urban-pfr package
+# ========================================
+
+numpy>=1.20.0
+pandas>=1.3.0
+
+# Geospatial data handling
+geopandas>=0.10.0
+fiona>=1.8.0
+shapely>=1.8.0
+scipy>=1.7.0
+
+# Visualization
+matplotlib>=3.4.0
+contextily>=1.1.0
+
+# Configuration
+pyyaml>=5.4.0
+
+
+

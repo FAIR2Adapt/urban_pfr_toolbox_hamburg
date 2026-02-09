@@ -1,9 +1,8 @@
 # urban_pfr 
 ### Urban Pluvial Flood Risk Assessment
-This package is an  implementation of the research and methodological framework proposed by:
-   von Szombathely, M., et al. (2025). Urban Pluvial Flood Risk Mapping: A High-Resolution Assessment for the City of Hamburg
-This package  is designed to be reusable for cities through city-specific configuration files,
-to eable CS6 to transfer the Hamburg case study to other locations.
+Python package conversion of the ArcGIS workflow from [Urban Pluvial Flood Risk Mapping: A High-Resolution Assessment for the City of Hamburg](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5231006) (von Szombathely et al., 2025).
+
+The package is designed to be reusable across cities through city-specific configuration files, for CS6 to transfer the Hamburg case study to target city.
 
 > **Note:** This version is under  development and requires verification by CS3
 > (Hamburg team) before finalizing the analysis pipeline and visualization.
@@ -59,5 +58,3 @@ The GDB (or individual shapefiles/GeoPackage files) must contain:
 | Flood layers | geometry (one per depth level) | Pluvial flood extents at each depth threshold |
 
 **CRS requirements:** All layers must be in the same coordinate reference system. The package will attempt to detect and fix mismatches automatically, but consistent input CRS is recommended. 
-
-# urban_pfr_toolbox_hamburg

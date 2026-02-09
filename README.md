@@ -11,6 +11,8 @@ The package is designed to be reusable across cities through city-specific confi
 ### Install
 
 ```bash
+git clone https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg.git
+cd urban_pfr_package
 pip install -e .
 ```
 ### Configure

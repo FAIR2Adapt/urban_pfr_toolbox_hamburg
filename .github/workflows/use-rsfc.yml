@@ -12,6 +12,15 @@ on:
     secrets:
       RSFC_TOKEN:
         required: false
+  workflow_dispatch: 
+    inputs:
+      repo_url:
+        description: 'Repository URL to analyze'
+        required: true
+        type: string
+      is_fork: 
+        required: true 
+        type: boolean
 
 jobs:
   run-rsfc:

@@ -1,0 +1,65 @@
+{
+  "name": "UrbanPluvialFloodRiskToolbox",
+  "label": "Urban Pluvial Flood Risk Toolbox",
+  "description": "A modular and configurable Python toolbox for urban pluvial flood risk assessment across cities.",
+  "type": "DataAnalysing",
+  "dockerImage": "urban-pluvial-flood-risk-toolbox",
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "Floodlevels",
+      "type": "Zip",
+      "label": "Floodlevels",
+      "path": "/mnt/inputs/Floodlevels.zip",
+      "description": "Contains the shapefiles of the corresponding flood depths with 30cm - 100cm depth. "
+    },
+    {
+      "name": "PluvialFooldRiskMap",
+      "type": "Zip",
+      "label": "PluvialFooldRiskMap",
+      "path": "/mnt/inputs/pluvialfloodriskmap.gdb.zip",
+      "description": "Zip archive containing the extracted ArcGIS Layer Package with the core spatial datasets for the study area. Extraction, should be pluvialfloodriskmap.gdb."
+    },
+    {
+      "name": "configYAML",
+      "description": "YAML configuration file, customized by the user using the provided one in the README.md",
+      "label": "YAML Configuration File",
+      "path": "/mnt/inputs/config.yaml",
+      "type": "TempFile"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "outputs",
+      "type": "Zip",
+      "path": "/mnt/outputs/outputs.zip",
+      "label": "Outputs",
+      "description": "Zip that contains the analyzed data"
+    }
+  ],
+  "resources": {
+    "cores": 8,
+    "memory": 4096,
+    "gpuNeeded": false,
+    "gpuMemory": 0,
+    "estimatedTime": 1
+  },
+  "tags": [
+    "risk",
+    "flood",
+    "urban",
+    "pluvial"
+  ],
+  "license": "GPLv3",
+  "version": "1.0.0",
+  "dependencies": [],
+  "publicationDate": "2026-02-17",
+  "author": "LifeWatch ERIC",
+  "bugs": {
+    "email": "https://helpdesk.lifewatch.eu/",
+    "url": ""
+  },
+  "citation": "Developed by Advance Services",
+  "testPath": "emptyUnitTest.sh",
+  "metaDataCatalogueUrl": "Available very soon"
+}

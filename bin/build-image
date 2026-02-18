@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+if ! test -n "$(command -v jq)"; then
+  echo "ERROR: jq not found, please look the dependencies section of the project README.md"
+  exit 1
+fi
+
+COL_BG_RED="\e[41m"
+COL_RESET='\e[0m'
+ANNOTATION_FILE="annotation.json"
+
+if ! test -f "$ANNOTATION_FILE"; then
+  echo -e "${COL_BG_RED}'annotation.json' is missing${COL_RESET}"
+  exit 1
+fi
+
+DOCKER_IMAGE=$(jq -r '.dockerImage // empty' < annotation.json)
+DOCKER_IMAGE_VERSION=$(jq -r '.version // empty' < annotation.json)
+
+if [[ -z "$DOCKER_IMAGE" ]]; then
+  echo -e "${COL_BG_RED}'dockerImage' key is missing OR empty, please check the annotation JSON${COL_RESET}"
+  exit 1
+fi
+
+if [[ -z "$DOCKER_IMAGE_VERSION" ]]; then
+  echo -e "${COL_BG_RED}'version' key is missing OR empty, please check the annotation JSON${COL_RESET}"
+  exit 1
+fi
+
+echo "$DOCKER_IMAGE:$DOCKER_IMAGE_VERSION"
+
+# Try to remove previous version of this image if present on the system
+docker rmi "$(docker images "$DOCKER_IMAGE:$DOCKER_IMAGE_VERSION" -a -q)" -f
+
+# Build image
+docker build -t "$DOCKER_IMAGE:$DOCKER_IMAGE_VERSION" .

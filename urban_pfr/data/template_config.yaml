@@ -1,12 +1,10 @@
-# urban_pfr configuration template for different city
-# Copy this file, rename to config_[city].yaml
-#
-# Docker users: place your filled config at data/inputs/config.yaml
-# Local users:  pass the path as argument: urban-pfr local config_[city].yaml
+# Copy this file, rename to config_[city].yaml.
+
+# Local users:  pass the path as argument: urban-pfr local myconfig.yaml
 
 project:
   city_name: "YourCity"
-  crs: "EPSG:25832"                     # must match data
+  crs: "EPSG:25832"                    
 
   paths:
     input_gdb: "path/to/your/data.gdb"

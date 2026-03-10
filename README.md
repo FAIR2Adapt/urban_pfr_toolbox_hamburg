@@ -17,6 +17,25 @@ git clone https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg.git
 cd urban_pfr_toolbox_hamburg
 git checkout feature/lifewatcheric
 ```
+
+
+## Run
+### Via Docker (LifeWatch platform)
+Place inputs in `data/inputs/`:
+- `config.yaml`
+- `Floodlevels.zip`
+- `pluvialfloodriskmap.gdb.zip`
+```bash
+./bin/build-image
+./bin/execute
+```
+
+### Locally witout Docker
+```bash
+pip install -e .
+urban-pfr local hamburg_config.yaml
+```
+
 ### Configure
 
 Create a new YAML copying the following and replacing the desired fields. Save it as config.yaml and use it as an input (place it in data/inputs/config.yaml).

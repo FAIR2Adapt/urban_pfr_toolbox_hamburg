@@ -1,6 +1,3 @@
-"""
-analyzer.py -- Main pipeline orchestrator for urban-pfr.
-"""
 
 import numpy as np
 import pandas as pd
@@ -19,7 +16,6 @@ warnings.filterwarnings('ignore')
 class PFRAnalyzer:
     """
     Pluvial Flood Risk Analyzer.
-    Runs the full IPCC risk pipeline: Risk = Hazard x Exposure x Vulnerability.
     """
 
     def __init__(self, config):
@@ -33,15 +29,28 @@ class PFRAnalyzer:
         crs = config.get('project', {}).get('crs', 'Not specified')
         print(f"PFRAnalyzer initialized -- {city}, {crs}")
 
+    def _resolve_file_path(self, paths, *keys):
+        for key in keys:
+            val = paths.get(key)
+            if val and Path(val).exists():
+                return val
+        return None
+
+    def _ensure_crs(self, gdf, label="layer"):
+        target_crs = self.config.get('project', {}).get('crs')
+        if target_crs and gdf.crs and str(gdf.crs) != target_crs:
+            print(f"  Reprojecting {label}: {gdf.crs} → {target_crs}")
+            gdf = gdf.to_crs(target_crs)
+        return gdf
+
     def load_data(self, input_gdb=None, flood_dir=None,
                   buildings_layer=None, stats_layer=None, streets_layer=None,
                   buildings_file=None, stats_file=None, streets_file=None,
                   validate_first=False):
         """
-        Load spatial data from GDB layers or individual files.
-
-        Priority: individual files > GDB layers.
-        Layer names default to config schema values, then fallback to generic names.
+          - paths.buildings 
+          - paths.statistical_units 
+          - paths.streets 
         """
         if validate_first:
             from .validation import validate_input_data
@@ -67,33 +76,48 @@ class PFRAnalyzer:
         if streets_layer is None:
             streets_layer = schema.get('streets_layer', 'Streets')
 
-        # Individual file overrides from config
+        #  Resolve file paths
         if buildings_file is None:
-            buildings_file = paths.get('buildings_file')
+            buildings_file = self._resolve_file_path(
+                paths, 'buildings', 'buildings_file')
         if stats_file is None:
-            stats_file = paths.get('stats_file')
+            stats_file = self._resolve_file_path(
+                paths, 'statistical_units', 'stats_file', 'stats')
         if streets_file is None:
-            streets_file = paths.get('streets_file')
+            streets_file = self._resolve_file_path(
+                paths, 'streets', 'streets_file')
 
-        # Load buildings
-        if buildings_file and Path(buildings_file).exists():
+        # Load buildings 
+        if buildings_file:
             self.buildings = gpd.read_file(buildings_file)
-        else:
+        elif input_gdb and Path(input_gdb).exists():
             self.buildings = gpd.read_file(input_gdb, layer=buildings_layer)
+        else:
+            raise FileNotFoundError(
+                "No buildings source found. Set paths.buildings or paths.input_gdb in config.")
+        self.buildings = self._ensure_crs(self.buildings, "buildings")
 
         # Load statistical units
-        if stats_file and Path(stats_file).exists():
+        if stats_file:
             self.statistical_units = gpd.read_file(stats_file)
-        else:
+        elif input_gdb and Path(input_gdb).exists():
             self.statistical_units = gpd.read_file(input_gdb, layer=stats_layer)
-
-        # Load streets
-        if streets_file and Path(streets_file).exists():
-            self.streets = gpd.read_file(streets_file)
         else:
-            self.streets = gpd.read_file(input_gdb, layer=streets_layer)
+            raise FileNotFoundError(
+                "No statistical units source found. Set paths.statistical_units or paths.input_gdb.")
+        self.statistical_units = self._ensure_crs(self.statistical_units, "statistical_units")
 
-        # Load flood layers -- tries .shp, .gpkg, .geojson for each depth
+        # Load streets 
+        if streets_file:
+            self.streets = gpd.read_file(streets_file)
+        elif input_gdb and Path(input_gdb).exists():
+            self.streets = gpd.read_file(input_gdb, layer=streets_layer)
+        else:
+            raise FileNotFoundError(
+                "No streets source found. Set paths.streets or paths.input_gdb.")
+        self.streets = self._ensure_crs(self.streets, "streets")
+
+        # Load flood layers 
         self.flood_layers = {}
         flood_depths = self.config.get('hazard_settings', {}).get(
             'flood_depths', [20, 30, 40, 50, 60, 70, 80, 90, 100]
@@ -103,7 +127,9 @@ class PFRAnalyzer:
                 flood_file = Path(flood_dir) / f"Flood_{depth}{ext}"
                 if flood_file.exists():
                     try:
-                        self.flood_layers[depth] = gpd.read_file(flood_file)
+                        fl = gpd.read_file(flood_file)
+                        fl = self._ensure_crs(fl, f"Flood_{depth}")
+                        self.flood_layers[depth] = fl
                         break
                     except Exception:
                         continue
@@ -175,7 +201,8 @@ class PFRAnalyzer:
             vulnerability_col='SVPF',
             weight_hazard=risk_cfg.get('weight_hazard', 1.0),
             weight_exposure=risk_cfg.get('weight_exposure', 1.0),
-            weight_vulnerability=risk_cfg.get('weight_vulnerability', 1.0)
+            weight_vulnerability=risk_cfg.get('weight_vulnerability', 1.0),
+            config=self.config
         )
         return self
 
@@ -226,7 +253,7 @@ class PFRAnalyzer:
 
         return create_risk_visualization(
             self.buildings, self.statistical_units,
-            pfrma_column='PFRMA_smoothed', pfrwb_column='PFRWB_smoothed',
+            pfrma_column='PFRMA', pfrwb_column='PFRWB',
             n_classes=n_classes, title_prefix=title_prefix, save_path=save_path,
             config=self.config
         )

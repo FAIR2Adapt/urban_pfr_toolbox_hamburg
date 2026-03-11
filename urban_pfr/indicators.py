@@ -1,13 +1,10 @@
 """
-indicators.py – Social vulnerability via TOPSIS (Steps 1-4 from ArcGIS).
-  Step 1: Sensitivity    = TOPSIS(indicators, weights, entr=True)
-  Step 2: CopingCapacity = TOPSIS(indicators, weights, entr=True)
-  Step 3: SVI            = TOPSIS([Sen, CCap], weights, entr=False)
-  Step 4: SVPF           = (SVI + threshold * mean(SVI)) ^ transform
+Social vulnerability
 """
 
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 import math
 import warnings
 import logging
@@ -181,21 +178,39 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
         threshold=svpf_threshold, transform=svpf_transform
     )
 
-    print(f"SVPF: range={buildings_result['SVPF'].min():.4f}-"
-          f"{buildings_result['SVPF'].max():.4f}, "
-          f"mean={buildings_result['SVPF'].mean():.4f}")
-
-    # aggregate to statistical units
+    # ── Aggregate to statistical units via sjoin + groupby ──
     stats_result = None
     if statistical_units_gdf is not None:
         stats_result = statistical_units_gdf.copy()
-        svpf_by_unit = {}
-        for idx, unit in stats_result.iterrows():
-            if unit.geometry is None or pd.isna(unit.geometry):
-                svpf_by_unit[idx] = 0
-                continue
-            in_unit = buildings_result[buildings_result.geometry.intersects(unit.geometry)]
-            svpf_by_unit[idx] = in_unit['SVPF'].mean() if len(in_unit) > 0 else 0
-        stats_result['svpf'] = pd.Series(svpf_by_unit)
+
+        # Use spatial join instead of per-unit intersects loop
+        bld_for_join = buildings_result[['geometry', 'SVPF']].copy()
+        bld_for_join = bld_for_join.dropna(subset=['SVPF'])
+
+        if len(bld_for_join) > 0 and len(stats_result) > 0:
+            try:
+                joined = gpd.sjoin(
+                    bld_for_join,
+                    stats_result[['geometry']],
+                    how='inner',
+                    predicate='intersects',
+                )
+                agg = joined.groupby('index_right')['SVPF'].mean()
+                stats_result['svpf'] = stats_result.index.map(agg).fillna(0)
+            except Exception as e:
+                logger.warning(f"sjoin aggregation failed, using fallback: {e}")
+                # Fallback: original per-unit loop
+                svpf_by_unit = {}
+                for idx, unit in stats_result.iterrows():
+                    if unit.geometry is None or pd.isna(unit.geometry):
+                        svpf_by_unit[idx] = 0
+                        continue
+                    in_unit = buildings_result[
+                        buildings_result.geometry.intersects(unit.geometry)
+                    ]
+                    svpf_by_unit[idx] = in_unit['SVPF'].mean() if len(in_unit) > 0 else 0
+                stats_result['svpf'] = pd.Series(svpf_by_unit)
+        else:
+            stats_result['svpf'] = 0
 
     return buildings_result, stats_result

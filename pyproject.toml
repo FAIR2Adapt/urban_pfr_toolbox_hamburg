@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "urban-pfr"
-version = "0.2.0"
+version = "0.2.1"
 description = "City-independent pluvial flood risk assessment package"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "", email = ""}
+    {name = "test", email = "zakieh@gmail.com"}
 ]
 keywords = [
     "flood risk",
@@ -57,6 +57,7 @@ viz = [
 
 [project.scripts]
 urban-pfr = "urban_pfr.cli:main"
+urban-pfr-figures = "urban_pfr.plot_figures:main"
 
 [project.urls]
 Homepage = "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg"

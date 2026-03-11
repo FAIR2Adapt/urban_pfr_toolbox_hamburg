@@ -1,483 +1,365 @@
+"""
+urban_pfr/viz.py
+=================
+Visualization for pluvial flood risk assessment.
+
+Supports two classification modes (set in config):
+  - "fixed":     Use exact ArcGIS .lyrx thresholds (for paper replication)
+  - "head_tail": Compute breaks dynamically (for new cities / different data)
+
+The mode is set in hamburg_config.yaml → visualization.classification_mode
+"""
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 import warnings
 
 warnings.filterwarnings('ignore')
 
-try:
-    import contextily as ctx
-    HAS_CONTEXTILY = True
-except ImportError:
-    HAS_CONTEXTILY = False
 
-CLASS_LABELS = ['very low', 'low', 'medium', 'high', 'very high']
+# =====================================================================
+#  DEFAULT COLORS — used when classification_mode = "head_tail"
+# =====================================================================
 
-SVPF_COLORS = [
-    '#ffffff',  # very low: white
-    '#d0d0d0',  # low: light grey
-    '#909090',  # medium: medium grey
-    '#505050',  # high: dark grey
-    '#202020',  # very high: very dark grey
+# 5 classes: [no risk / very low, low, medium, high, very high]
+DEFAULT_PFRMA_COLORS = [
+    '#FFFFFF',   # no risk:   White
+    '#FFF2CC',   # low:       Light yellow      (from ArcGIS .lyrx)
+    '#FFD966',   # medium:    Yellow
+    '#FF9900',   # high:      Orange
+    '#CC7A00',   # very high: Dark orange/amber
 ]
 
-PFRMA_COLOR_MAP = [
-    (0, 0, 0, 0),            # 0: transparent
-    (1.0, 0.95, 0.6, 0.9),   # 1: light yellow
-    (1.0, 0.82, 0.3, 0.9),   # 2: yellow
-    (0.95, 0.65, 0.1, 0.9),  # 3: dark yellow / amber
-    (0.85, 0.45, 0.0, 0.9),  # 4: deep orange-yellow
+DEFAULT_PFRWB_COLORS = [
+    '#FFFFFF',   # no risk:   White
+    '#C18EAE',   # low:       Light purple  (from ArcGIS .lyrx)
+    '#A8608D',   # medium:    Medium purple
+    '#841D5D',   # high:      Dark purple
+    '#5C1441',   # very high: Deep wine/maroon
 ]
 
-PFRWB_COLOR_MAP = [
-    (0, 0, 0, 0),            # 0: transparent
-    (0.85, 0.75, 0.92, 0.9), # 1: light purple
-    (0.68, 0.50, 0.78, 0.9), # 2: purple
-    (0.52, 0.28, 0.65, 0.9), # 3: dark purple
-    (0.38, 0.10, 0.55, 0.9), # 4: deep purple
+DEFAULT_SVPF_COLORS = [
+    '#FFFFFF',   # very low:  White
+    '#D0D0D0',   # low:       Light grey
+    '#909090',   # medium:    Medium grey
+    '#505050',   # high:      Dark grey
+    '#202020',   # very high: Very dark grey
 ]
 
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-RED    = "\033[91m"
-RESET  = "\033[0m"
+DEFAULT_LABELS = ['No risk', 'Low', 'Medium', 'High', 'Very high']
 
 
-def _prepare_viz_gdf(gdf):
-    """
-    Mis match for visualize, create a copy in Web Mercator (EPSG:3857) for basemap compatibility.
-    """
-    viz_gdf = gdf.copy()
-    if viz_gdf.crs is None:
-        viz_gdf.set_crs(epsg=25832, inplace=True)
-    return viz_gdf.to_crs(epsg=3857)
-
-
-def _add_basemap(ax, zoom='auto', alpha=0.5):
-    """
-    Add a light grey basemap.
-    """
-    if not HAS_CONTEXTILY:
-        return
-
-    try:
-        ctx.add_basemap(
-            ax,
-            crs='EPSG:3857',
-            source=ctx.providers.CartoDB.Positron,
-            zoom=zoom,
-            alpha=alpha,
-        )
-    except Exception as e:
-        # Fallback: try without specific zoom
-        try:
-            ctx.add_basemap(
-                ax,
-                crs='EPSG:3857',
-                source=ctx.providers.CartoDB.Positron,
-                alpha=alpha,
-            )
-        except Exception:
-            print(f"Basemap unavailable: {e}")
-
-
-# --- Classification ---
+# =====================================================================
+#  HEAD/TAIL BREAKS — dynamic classification
+# =====================================================================
 
 def head_tail_breaks(values, n_iterations=3):
     """
-    Head/tail breaks classification (Step6 in ArcGIS workflow).
+    Head/tail breaks classification.
+
+    Matches Step6_Calculating_classes_for_visualization.py from ArcGIS:
+    iteratively compute mean, keep values > mean, repeat.
+
+    Parameters
+    ----------
+    values : array-like
+        Non-zero, non-NaN risk values.
+    n_iterations : int
+        Number of iterations (3 → 4 breaks → 5 classes including zero).
+
+    Returns
+    -------
+    breaks : list of float
+        Break points (length = n_iterations or fewer).
     """
-    values = np.array(values, dtype=float)
-    values = values[~np.isnan(values)]
-    values = values[values > 0]
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values) & (values > 0)]
 
     if len(values) == 0:
         return []
 
-    means = []
+    breaks = []
     current = values.copy()
 
     for _ in range(n_iterations):
-        if len(current) == 0:
+        if len(current) < 2:
             break
         mean_val = np.mean(current)
-        means.append(mean_val)
+        breaks.append(mean_val)
         current = current[current > mean_val]
 
-    return means
+    return sorted(breaks)
 
 
-def classify_risk_values(values, n_iterations=3):
+# =====================================================================
+#  CLASSIFICATION — unified interface for both modes
+# =====================================================================
+
+def classify_values(values, risk_type='PFRWB', config=None):
     """
-    Classify values into 5 classes using head/tail breaks.
+    Classify risk values into discrete classes.
 
-    Classes:
-        0 = very low (zero/null -> transparent)
-        1 = low (0 < val <= break1)
-        2 = medium (break1 < val <= break2)
-        3 = high (break2 < val <= break3)
-        4 = very high (val > break3)
+    Reads classification_mode from config to choose between fixed
+    ArcGIS thresholds or dynamic head/tail breaks.
+
+    Parameters
+    ----------
+    values : array-like
+        Raw risk values (NOT normalized to 0–1 if using fixed mode).
+    risk_type : str
+        'PFRMA', 'PFRWB', or 'SVPF'. Used to look up fixed thresholds.
+    config : dict, optional
+        Full config dict with visualization settings.
+
+    Returns
+    -------
+    classes : np.ndarray of int
+        Class index for each value (0 = no risk, 1–4 = low–very high).
+    bounds : list of float
+        The boundary values used (including 0 and max).
+    colors : list of str
+        HEX color for each class.
+    labels : list of str
+        Label for each class.
     """
-    values = np.array(values, dtype=float)
-    breaks = head_tail_breaks(values, n_iterations)
+    values = np.asarray(values, dtype=float)
+    viz_cfg = config.get('visualization', {}) if config else {}
+    mode = viz_cfg.get('classification_mode', 'head_tail')
 
-    classes = np.zeros(len(values), dtype=int)
-    for i, val in enumerate(values):
-        if np.isnan(val) or val <= 0:
-            classes[i] = 0
+    # ----- FIXED MODE: use ArcGIS .lyrx thresholds -----
+    if mode == 'fixed':
+        fixed = viz_cfg.get('fixed_thresholds', {}).get(risk_type)
+        if fixed:
+            bounds = fixed['bounds']
+            colors = fixed['colors']
+            labels = fixed['labels']
+
+            classes = np.digitize(values, bounds[1:])
+            classes = np.clip(classes, 0, len(colors) - 1)
+
+            print(f"    Mode: FIXED (ArcGIS .lyrx thresholds)")
+            print(f"    Bounds: {bounds}")
+            for i, lbl in enumerate(labels):
+                count = (classes == i).sum()
+                print(f"      {lbl}: {count} buildings")
+
+            return classes, bounds, colors, labels
         else:
-            assigned = False
-            for c, threshold in enumerate(breaks):
-                if val <= threshold:
-                    classes[i] = c + 1
-                    assigned = True
-                    break
-            if not assigned:
-                classes[i] = len(breaks) + 1
+            print(f"    ⚠️  No fixed thresholds for '{risk_type}' — "
+                  f"falling back to head_tail")
 
-    classes = np.minimum(classes, 4)
-    breaks = [0] + breaks
-    return classes, breaks
+    # ----- QUANTILE MODE: equal-count bins (best for small datasets) -----
+    if mode == 'quantile':
+        nonzero = values[values > 0]
+        if len(nonzero) >= 4:
+            q25, q50, q75 = np.percentile(nonzero, [25, 50, 75])
+            breaks = [q25, q50, q75]
+        elif len(nonzero) > 0:
+            breaks = [np.mean(nonzero)]
+        else:
+            breaks = []
 
+        max_val = np.nanmax(values) if len(values) > 0 else 1.0
+        bounds = [0, 0.0001] + breaks + [max_val * 1.01]
+        while len(bounds) < 6:
+            bounds.insert(-1, bounds[-1])
+        bounds = bounds[:6]
 
-# --- Color helpers ---
+        color_cfg = viz_cfg.get('colors', {})
+        if risk_type == 'PFRMA':
+            colors = color_cfg.get('pfrma', DEFAULT_PFRMA_COLORS)
+        elif risk_type == 'PFRWB':
+            colors = color_cfg.get('pfrwb', DEFAULT_PFRWB_COLORS)
+        elif risk_type == 'SVPF':
+            colors = color_cfg.get('svpf', DEFAULT_SVPF_COLORS)
+        else:
+            colors = DEFAULT_PFRWB_COLORS
 
-def _normalize_values(values):
-    """Normalize positive values to 0-1 range for color mapping."""
-    values = np.array(values, dtype=float)
-    positive = values[values > 0]
-    if len(positive) == 0:
-        return np.zeros_like(values)
-    vmin, vmax = positive.min(), positive.max()
-    if vmax == vmin:
-        return np.where(values > 0, 0.5, 0.0)
-    normed = np.where(values > 0, (values - vmin) / (vmax - vmin), 0.0)
-    return np.clip(normed, 0, 1)
+        labels = DEFAULT_LABELS[:len(colors)]
+        classes = np.digitize(values, bounds[1:-1])
+        classes = np.clip(classes, 0, len(colors) - 1)
 
+        print(f"    Mode: QUANTILE (percentile-based)")
+        print(f"    Bounds: {[f'{b:.4f}' for b in bounds]}")
+        for i, lbl in enumerate(labels):
+            count = (classes == i).sum()
+            print(f"      {lbl}: {count} buildings")
 
-def _yellow_color(intensity):
-    """Yellow color for PFRMA at given intensity (0-1)."""
-    return [1.0, 0.85 - 0.4 * intensity, 0.2 * (1 - intensity),
-            0.3 + 0.6 * intensity]
+        return classes, bounds, colors, labels
 
+    # ----- DYNAMIC MODE: head/tail breaks -----
+    n_iter = viz_cfg.get('n_iterations', 3)
+    breaks = head_tail_breaks(values, n_iterations=n_iter)
 
-def _purple_color(intensity):
-    """Purple color for PFRWB at given intensity (0-1)."""
-    return [0.55 + 0.1 * intensity, 0.25 * (1 - intensity),
-            0.5 + 0.2 * intensity, 0.3 + 0.5 * intensity]
+    # Build bounds: [0, break1, break2, ..., max]
+    max_val = np.nanmax(values) if len(values) > 0 else 1.0
+    bounds = [0] + breaks + [max_val * 1.01]
 
+    # Ensure we have exactly 5 classes (pad or trim breaks)
+    while len(bounds) < 6:
+        bounds.insert(-1, bounds[-1])
+    bounds = bounds[:6]
 
-# --- Plot helpers ---
-
-def _plot_risk_layers(ax, buildings_gdf, pfrma_norm, pfrwb_norm,
-                      has_pfrma, has_pfrwb, plot_no_risk=True):
-    """Plot yellow PFRMA + purple PFRWB layers with transparency blending."""
-    no_risk = ~(has_pfrma | has_pfrwb)
-
-    if plot_no_risk and no_risk.any():
-        buildings_gdf[no_risk].plot(ax=ax, color='#e8e8e8',
-                                   edgecolor='none', linewidth=0, alpha=0.3)
-
-    # Layer 1: PFRMA (yellow)
-    if has_pfrma.any():
-        gdf = buildings_gdf[has_pfrma]
-        intensities = pfrma_norm[has_pfrma]
-        colors = [_yellow_color(i) for i in intensities]
-        for idx in range(len(gdf)):
-            gdf.iloc[idx:idx + 1].plot(ax=ax, color=colors[idx],
-                                       edgecolor='none', linewidth=0)
-
-    # Layer 2: PFRWB (purple) on top
-    if has_pfrwb.any():
-        gdf = buildings_gdf[has_pfrwb]
-        intensities = pfrwb_norm[has_pfrwb]
-        colors = [_purple_color(i) for i in intensities]
-        for idx in range(len(gdf)):
-            gdf.iloc[idx:idx + 1].plot(ax=ax, color=colors[idx],
-                                       edgecolor='none', linewidth=0)
-
-
-def _add_bivariate_legend(ax, position='upper right', size=0.12):
-    """
-    Add 2D bivariate legend matching Figure 4 in the paper.
-    Yellow (PFRMA) on x-axis, purple (PFRWB) on y-axis.
-    """
-    n = 4
-    legend_data = np.zeros((n, n, 4))
-
-    for iy in range(n):
-        for ix in range(n):
-            yellow = np.array([1.0, 0.85, 0.2, ix / (n - 1) * 0.8])
-            purple = np.array([0.55, 0.25, 0.7, iy / (n - 1) * 0.8])
-            a_out = purple[3] + yellow[3] * (1 - purple[3])
-            if a_out > 0:
-                rgb = (purple[:3] * purple[3] +
-                       yellow[:3] * yellow[3] * (1 - purple[3])) / a_out
-            else:
-                rgb = np.array([1, 1, 1])
-            legend_data[iy, ix] = [*rgb, max(a_out, 0.15)]
-
-    bbox = ax.get_position()
-    fig_x = bbox.x0 + 0.98 * bbox.width
-    fig_y = bbox.y0 + 0.98 * bbox.height
-
-    leg_w, leg_h = size, size
-    leg_ax = ax.figure.add_axes([fig_x - leg_w - 0.01,
-                                  fig_y - leg_h - 0.01, leg_w, leg_h])
-    leg_ax.imshow(legend_data, origin='lower', aspect='auto',
-                  interpolation='nearest')
-    leg_ax.set_xticks([0, n - 1])
-    leg_ax.set_xticklabels(['Low', 'High'], fontsize=6)
-    leg_ax.set_yticks([0, n - 1])
-    leg_ax.set_yticklabels(['Low', 'High'], fontsize=6)
-    leg_ax.set_xlabel('PFR$_{MA}$', fontsize=7, labelpad=2)
-    leg_ax.set_ylabel('PFR$_{WB}$', fontsize=7, labelpad=2)
-    leg_ax.tick_params(length=0)
-    leg_ax.set_title('Pluvial flood risk (PFR)', fontsize=7, pad=3)
-
-    leg_ax.annotate('to mobility &\naccessibility (MA)',
-                    xy=(1, -0.18), xycoords='axes fraction',
-                    fontsize=5, ha='right', va='top', color='#d4a017')
-    leg_ax.annotate('to well-\nbeing (WB)',
-                    xy=(-0.18, 1), xycoords='axes fraction',
-                    fontsize=5, ha='right', va='top', color='#7b3fa0',
-                    rotation=90)
-
-    return leg_ax
-
-
-# --- Standalone figure functions ---
-
-def create_figure4(buildings_gdf, n_iterations=3, figsize=(12, 10),
-                   pfrma_column='PFRMA_smoothed',
-                   pfrwb_column='PFRWB_smoothed',
-                   title=None, save_path=None, dpi=300,
-                   basemap=True):
-    #ToDO papers figure mismatch??
-    """
-    Create Figure 4: Combined pluvial flood risk map (PFRMA & PFRWB).
-    """
-    # Reproject for basemap
-    bld = _prepare_viz_gdf(buildings_gdf)
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.set_facecolor('#f0f0f0')
-
-    pfrma_vals = bld[pfrma_column].fillna(0).values
-    pfrwb_vals = bld[pfrwb_column].fillna(0).values
-
-    pfrma_classes, pfrma_breaks = classify_risk_values(pfrma_vals, n_iterations)
-    pfrwb_classes, pfrwb_breaks = classify_risk_values(pfrwb_vals, n_iterations)
-
-    pfrma_norm = _normalize_values(pfrma_vals)
-    pfrwb_norm = _normalize_values(pfrwb_vals)
-
-    has_pfrma = pfrma_vals > 0
-    has_pfrwb = pfrwb_vals > 0
-
-    print(f"PFRMA breaks: {[f'{b:.4f}' for b in pfrma_breaks]}")
-    print(f"PFRWB breaks: {[f'{b:.4f}' for b in pfrwb_breaks]}")
-    # print(f"PFRMA class dist: "
-    #       f"{dict(zip(*np.unique(pfrma_classes, return_counts=True)))}")
-    # print(f"PFRWB class dist: "
-    #       f"{dict(zip(*np.unique(pfrwb_classes, return_counts=True)))}")
-
-    _plot_risk_layers(ax, bld, pfrma_norm, pfrwb_norm,
-                      has_pfrma, has_pfrwb)
-
-    if basemap:
-        _add_basemap(ax)
-
-    ax.axis('off')
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold')
-
-    _add_bivariate_legend(ax)
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=dpi, bbox_inches='tight')
-        print(f"{GREEN}Saved to: {save_path}{RESET}\n")
-
-    return fig, ax
-
-
-def create_figure5(buildings_gdf, statistical_units_gdf,
-                   pfrma_column='PFRMA_smoothed',
-                   pfrwb_column='PFRWB_smoothed',
-                   svpf_column='svpf', n_iterations=3,
-                   figsize=(12, 10), title=None, save_path=None, dpi=300,
-                   basemap=True):
-    #ToDO papers figure mismatch??
-    """
-    Create Figure 5? Social vulnerability (SVPF) with risk overlay.
-    """
-    bld = _prepare_viz_gdf(buildings_gdf)
-    stu = _prepare_viz_gdf(statistical_units_gdf)
-
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.set_facecolor('#f0f0f0')
-
-    # Background: SVPF grey gradient
-    if svpf_column in stu.columns:
-        svpf_vals = stu[svpf_column].fillna(0).values
-        svpf_classes, svpf_breaks = classify_risk_values(svpf_vals, n_iterations)
-        print(f"SVPF breaks: {[f'{b:.4f}' for b in svpf_breaks]}")
-
-        for cls in range(5):
-            mask = svpf_classes == cls
-            if mask.any():
-                stu[mask].plot(ax=ax, color=SVPF_COLORS[cls],
-                               edgecolor='#aaaaaa', linewidth=0.5, alpha=0.7)
+    # Get colors from config or defaults
+    color_cfg = viz_cfg.get('colors', {})
+    if risk_type == 'PFRMA':
+        colors = color_cfg.get('pfrma', DEFAULT_PFRMA_COLORS)
+    elif risk_type == 'PFRWB':
+        colors = color_cfg.get('pfrwb', DEFAULT_PFRWB_COLORS)
+    elif risk_type == 'SVPF':
+        colors = color_cfg.get('svpf', DEFAULT_SVPF_COLORS)
     else:
-        stu.plot(ax=ax, color='#e0e0e0',
-                 edgecolor='#aaaaaa', linewidth=0.5, alpha=0.5)
+        colors = DEFAULT_PFRWB_COLORS
 
-    # Overlay: risk layers
-    pfrma_vals = bld[pfrma_column].fillna(0).values
-    pfrwb_vals = bld[pfrwb_column].fillna(0).values
-    pfrma_norm = _normalize_values(pfrma_vals)
-    pfrwb_norm = _normalize_values(pfrwb_vals)
-    has_pfrma = pfrma_vals > 0
-    has_pfrwb = pfrwb_vals > 0
+    labels = DEFAULT_LABELS[:len(colors)]
 
-    _plot_risk_layers(ax, bld, pfrma_norm, pfrwb_norm,
-                      has_pfrma, has_pfrwb, plot_no_risk=False)
+    # Classify
+    classes = np.digitize(values, bounds[1:-1])
+    classes = np.clip(classes, 0, len(colors) - 1)
 
-    if basemap:
-        _add_basemap(ax, alpha=0.3)
+    print(f"    Mode: HEAD_TAIL (n_iterations={n_iter})")
+    print(f"    Breaks: {[f'{b:.4f}' for b in breaks]}")
+    for i, lbl in enumerate(labels):
+        count = (classes == i).sum()
+        print(f"      {lbl}: {count} buildings")
 
-    ax.axis('off')
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold')
-
-    sv_legend = [Patch(facecolor=SVPF_COLORS[i], edgecolor='grey',
-                       label=CLASS_LABELS[i]) for i in range(5)]
-    ax.legend(handles=sv_legend, loc='lower left',
-              title='Social vulnerability (SV$_{PF}$)',
-              fontsize=8, title_fontsize=9)
-
-    _add_bivariate_legend(ax)
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=dpi, bbox_inches='tight')
-        print(f"{GREEN}Saved to: {save_path}{RESET}\n")
+    return classes, bounds, colors, labels
 
 
-    return fig, ax
-
-
-def create_figure6(buildings_gdf, statistical_units_gdf,
-                   sensitivity_column='Sensitivity',
-                   coping_column='CopingCapacity',
-                   pfrma_column='PFRMA_smoothed',
-                   pfrwb_column='PFRWB_smoothed',
-                   n_iterations=3, figsize=(12, 10),
-                   title=None, save_path=None, dpi=300,
-                   basemap=True):
+def get_cmap_and_norm(bounds, colors_hex):
     """
-    Create Figure 6 from paper???
+    Build matplotlib ListedColormap + BoundaryNorm.
+
+    Parameters
+    ----------
+    bounds : list of float
+        Class boundaries, e.g. [0, 0.0001, 2.876, 10.0295, 15.5199, 28.4086].
+    colors_hex : list of str
+        HEX color per class.
+
+    Returns
+    -------
+    cmap : ListedColormap
+    norm : BoundaryNorm
     """
-    bld = _prepare_viz_gdf(buildings_gdf)
-    stu = _prepare_viz_gdf(statistical_units_gdf)
+    cmap = mcolors.ListedColormap(colors_hex)
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+    return cmap, norm
 
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.set_facecolor('#f0f0f0')
 
-    has_sens = sensitivity_column in stu.columns
-    has_cope = coping_column in stu.columns
+# =====================================================================
+#  SINGLE-PANEL PLOT FUNCTIONS
+# =====================================================================
 
-    if has_sens and has_cope:
-        sens_vals = stu[sensitivity_column].fillna(0).values
-        cope_vals = stu[coping_column].fillna(0).values
+def plot_risk_panel(buildings_gdf, risk_column, risk_type,
+                    ax, config=None, title=None,
+                    statistical_units_gdf=None,
+                    edgecolor='black', linewidth=0.5,
+                    show_basemap=False):
+    """
+    Plot a single risk panel (PFRMA, PFRWB, or SVPF).
 
-        sens_classes, sens_breaks = classify_risk_values(sens_vals, n_iterations)
-        cope_classes, cope_breaks = classify_risk_values(cope_vals, n_iterations)
+    Parameters
+    ----------
+    buildings_gdf : GeoDataFrame
+        Buildings with the risk column.
+    risk_column : str
+        Column name to plot (e.g. 'PFRWB', 'PFRMA_smoothed').
+    risk_type : str
+        'PFRMA', 'PFRWB', or 'SVPF' — determines thresholds and colors.
+    ax : matplotlib Axes
+        Axes to draw on.
+    config : dict, optional
+        Config with visualization settings.
+    title : str, optional
+        Panel title.
+    statistical_units_gdf : GeoDataFrame, optional
+        If provided, draws unit boundaries as background.
+    """
+    values = buildings_gdf[risk_column].fillna(0).values
 
-        print(f"Sensitivity breaks: {[f'{b:.4f}' for b in sens_breaks]}")
-        print(f"Coping capacity breaks: {[f'{b:.4f}' for b in cope_breaks]}")
+    # Classify
+    print(f"\n  Classifying {risk_column} as {risk_type}:")
+    classes, bounds, colors, labels = classify_values(
+        values, risk_type=risk_type, config=config
+    )
 
-        sens_norm = _normalize_values(sens_vals)
-        cope_norm = _normalize_values(cope_vals)
+    # Background: statistical units
+    if statistical_units_gdf is not None:
+        statistical_units_gdf.plot(
+            ax=ax,
+            facecolor='#f5f5f5',
+            edgecolor='#cccccc',
+            linewidth=0.3,
+        )
 
-        for idx in range(len(stu)):
-            s = sens_norm[idx]
-            c = cope_norm[idx]
-            r = 0.9 - 0.5 * max(s, c)
-            g = 0.9 - 0.6 * s + 0.1 * c
-            b = 0.9 - 0.6 * c + 0.1 * s
-            color = [np.clip(r, 0, 1), np.clip(g, 0, 1),
-                     np.clip(b, 0, 1), 0.7]
-            stu.iloc[idx:idx + 1].plot(
-                ax=ax, color=color, edgecolor='#aaaaaa', linewidth=0.5)
+    # Build colormap
+    cmap, norm = get_cmap_and_norm(bounds, colors)
+
+    # Plot buildings
+    buildings_gdf.plot(
+        column=risk_column,
+        cmap=cmap,
+        norm=norm,
+        ax=ax,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+    )
+
+    # Optional basemap
+    if show_basemap:
+        try:
+            import contextily as ctx
+            ctx.add_basemap(
+                ax,
+                crs=buildings_gdf.crs,
+                source=ctx.providers.CartoDB.Positron,
+                alpha=0.3,
+            )
+        except Exception:
+            pass
+
+    # Legend
+    legend_elements = [
+        Patch(facecolor=c, edgecolor='black', linewidth=0.5, label=lbl)
+        for c, lbl in zip(colors, labels)
+    ]
+
+    # Subscript label
+    if risk_type == 'PFRWB':
+        legend_title = 'PFR$_{WB}$'
+    elif risk_type == 'PFRMA':
+        legend_title = 'PFR$_{MA}$'
     else:
-        stu.plot(ax=ax, color='#e0e0e0',
-                 edgecolor='#aaaaaa', linewidth=0.5, alpha=0.5)
-        if not has_sens:
-            print(f"Warning: '{sensitivity_column}' not found")
-        if not has_cope:
-            print(f"Warning: '{coping_column}' not found")
+        legend_title = risk_type
 
-    # Overlay: risk layers
-    pfrma_vals = bld[pfrma_column].fillna(0).values
-    pfrwb_vals = bld[pfrwb_column].fillna(0).values
-    pfrma_norm = _normalize_values(pfrma_vals)
-    pfrwb_norm = _normalize_values(pfrwb_vals)
-    has_pfrma = pfrma_vals > 0
-    has_pfrwb = pfrwb_vals > 0
+    ax.legend(
+        handles=legend_elements,
+        title=legend_title,
+        loc='lower right',
+        fontsize=8,
+        title_fontsize=9,
+        framealpha=0.9,
+    )
 
-    _plot_risk_layers(ax, bld, pfrma_norm, pfrwb_norm,
-                      has_pfrma, has_pfrwb, plot_no_risk=False)
-
-    if basemap:
-        _add_basemap(ax, alpha=0.3)
-
-    ax.axis('off')
     if title:
-        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_title(title, fontsize=13, fontweight='bold')
+    ax.axis('off')
 
-    # Bivariate legend for background
-    if has_sens and has_cope:
-        n = 4
-        bg_legend = np.zeros((n, n, 4))
-        for iy in range(n):
-            for ix in range(n):
-                s = ix / (n - 1)
-                c = iy / (n - 1)
-                r = 0.9 - 0.5 * max(s, c)
-                g = 0.9 - 0.6 * s + 0.1 * c
-                b_val = 0.9 - 0.6 * c + 0.1 * s
-                bg_legend[iy, ix] = [np.clip(r, 0, 1), np.clip(g, 0, 1),
-                                     np.clip(b_val, 0, 1), 0.85]
+    # Attribution
+    ax.text(0.01, 0.02, '(C) OpenStreetMap contributors\n(C) CARTO',
+            transform=ax.transAxes, fontsize=6, color='grey',
+            verticalalignment='bottom')
 
-        bbox = ax.get_position()
-        lx = bbox.x0 + 0.01
-        ly = bbox.y0 + 0.01
-        lw, lh = 0.1, 0.1
-        leg_ax = ax.figure.add_axes([lx, ly, lw, lh])
-        leg_ax.imshow(bg_legend, origin='lower', aspect='auto',
-                      interpolation='nearest')
-        leg_ax.set_xticks([0, n - 1])
-        leg_ax.set_xticklabels(['Low', 'High'], fontsize=6)
-        leg_ax.set_yticks([0, n - 1])
-        leg_ax.set_yticklabels(['Low', 'High'], fontsize=6)
-        leg_ax.set_xlabel('Coping capacity', fontsize=7, labelpad=2)
-        leg_ax.set_ylabel('Sensitivity', fontsize=7, labelpad=2)
-        leg_ax.tick_params(length=0)
-
-    _add_bivariate_legend(ax)
-    plt.tight_layout()
-
-    if save_path:
-        fig.savefig(save_path, dpi=dpi, bbox_inches='tight')
-        print(f"{GREEN}Saved to: {save_path}{RESET}\n")
+    return classes
 
 
-    return fig, ax
-
+# =====================================================================
+#  THREE-PANEL VISUALIZATION
+# =====================================================================
 
 def create_risk_visualization(buildings_gdf, statistical_units_gdf,
                               pfrma_column='PFRMA_smoothed',
@@ -491,155 +373,254 @@ def create_risk_visualization(buildings_gdf, statistical_units_gdf,
                               title_prefix="",
                               save_path=None,
                               dpi=300,
-                              config=None,
-                              basemap=True):
+                              config=None):
     """
     Create 3-panel visualization:
+
+    Panel A: PFRMA risk (yellow/orange classes)
+    Panel B: PFRWB risk (purple/wine classes)
+    Panel C: Combined bivariate overlay
+
+    Supports both fixed (ArcGIS) and dynamic (head/tail) classification
+    via config['visualization']['classification_mode'].
+
+    Parameters
+    ----------
+    buildings_gdf : GeoDataFrame
+        Buildings with risk columns.
+    statistical_units_gdf : GeoDataFrame
+        Statistical units for background.
+    pfrma_column : str
+        PFRMA column to plot. Use 'PFRMA' for unsmoothed.
+    pfrwb_column : str
+        PFRWB column to plot. Use 'PFRWB' for unsmoothed.
+    config : dict, optional
+        Config with visualization settings.
     """
     # Backward compatibility
     if n_classes is not None:
         n_iterations = n_classes
 
-    # Reproject for basemap (internal copies, originals unchanged)
-    bld = _prepare_viz_gdf(buildings_gdf)
-    stu = _prepare_viz_gdf(statistical_units_gdf)
+    # Get figsize/dpi from config if available
+    viz_cfg = config.get('visualization', {}) if config else {}
+    figsize = viz_cfg.get('figsize', figsize)
+    if isinstance(figsize, list):
+        figsize = tuple(figsize)
+    dpi = viz_cfg.get('dpi', dpi)
+
+    city = ""
+    if config:
+        city = config.get('project', {}).get('city_name', '')
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    fig.subplots_adjust(bottom=0.15, wspace=0.05)
 
-    pfrma_vals = bld[pfrma_column].fillna(0).values
-    pfrwb_vals = bld[pfrwb_column].fillna(0).values
+    # ── Panel A: PFRMA ──
+    print(f"\n{'='*60}")
+    print(f"PANEL A: {pfrma_column}")
+    print(f"{'='*60}")
+    plot_risk_panel(
+        buildings_gdf, pfrma_column, 'PFRMA',
+        ax=axes[0], config=config,
+        title=f'{city} - (A) PFR$_{{MA}}$ Risk\n(Mobility & Accessibility)',
+        statistical_units_gdf=statistical_units_gdf,
+    )
 
-    pfrma_classes, pfrma_breaks = classify_risk_values(pfrma_vals, n_iterations)
-    pfrwb_classes, pfrwb_breaks = classify_risk_values(pfrwb_vals, n_iterations)
+    # ── Panel B: PFRWB ──
+    print(f"\n{'='*60}")
+    print(f"PANEL B: {pfrwb_column}")
+    print(f"{'='*60}")
+    plot_risk_panel(
+        buildings_gdf, pfrwb_column, 'PFRWB',
+        ax=axes[1], config=config,
+        title=f'{city} - (B) PFR$_{{WB}}$ Risk\n(Well-being)',
+        statistical_units_gdf=statistical_units_gdf,
+    )
 
-    has_pfrma = pfrma_vals > 0
-    has_pfrwb = pfrwb_vals > 0
-
-    print(f"PFRMA breaks: {[f'{b:.4f}' for b in pfrma_breaks]}")
-    print(f"PFRWB breaks: {[f'{b:.4f}' for b in pfrwb_breaks]}")
-    # print(f"PFRMA class dist: "
-    #       f"{dict(zip(*np.unique(pfrma_classes, return_counts=True)))}")
-    # print(f"PFRWB class dist: "
-    #       f"{dict(zip(*np.unique(pfrwb_classes, return_counts=True)))}")
-
-    # ---- Panel A: PFRMA only (yellow) ----
-    ax1 = axes[0]
-    ax1.set_facecolor('#f0f0f0')
-
-    no_risk_ma = pfrma_classes == 0
-    if no_risk_ma.any():
-        bld[no_risk_ma].plot(ax=ax1, color='#e8e8e8',
-                             edgecolor='none', linewidth=0, alpha=0.2)
-
-    for cls in range(1, 5):
-        mask = pfrma_classes == cls
-        if mask.any():
-            bld[mask].plot(ax=ax1, color=PFRMA_COLOR_MAP[cls],
-                           edgecolor='black', linewidth=0.3)
-
-    if basemap:
-        _add_basemap(ax1)
-
-    ax1.set_title(f'{title_prefix}(A) PFR$_{{MA}}$ Risk\n(Mobility & Accessibility)',
-                  fontsize=12, fontweight='bold')
-    ax1.axis('off')
-
-    legend_a = [Patch(facecolor=PFRMA_COLOR_MAP[i], edgecolor='black',
-                      label=CLASS_LABELS[i].title())
-                for i in range(1, 5) if (pfrma_classes == i).sum() > 0]
-    if legend_a:
-        ax1.legend(handles=legend_a, loc='lower right', fontsize=8,
-                   title='PFR$_{MA}$', title_fontsize=9)
-
-    xlim = ax1.get_xlim()
-    ylim = ax1.get_ylim()
-
-    # ---- Panel B: PFRWB only (purple) ----
-    ax2 = axes[1]
-    ax2.set_facecolor('#f0f0f0')
-
-    no_risk_wb = pfrwb_classes == 0
-    if no_risk_wb.any():
-        bld[no_risk_wb].plot(ax=ax2, color='#e8e8e8',
-                             edgecolor='none', linewidth=0, alpha=0.2)
-
-    for cls in range(1, 5):
-        mask = pfrwb_classes == cls
-        if mask.any():
-            bld[mask].plot(ax=ax2, color=PFRWB_COLOR_MAP[cls],
-                           edgecolor='black', linewidth=0.3)
-
-    ax2.set_xlim(xlim)
-    ax2.set_ylim(ylim)
-
-    if basemap:
-        _add_basemap(ax2)
-
-    ax2.set_title(f'{title_prefix}(B) PFR$_{{WB}}$ Risk\n(Well-being)',
-                  fontsize=12, fontweight='bold')
-    ax2.axis('off')
-
-    legend_b = [Patch(facecolor=PFRWB_COLOR_MAP[i], edgecolor='black',
-                      label=CLASS_LABELS[i].title())
-                for i in range(1, 5) if (pfrwb_classes == i).sum() > 0]
-    if legend_b:
-        ax2.legend(handles=legend_b, loc='lower right', fontsize=8,
-                   title='PFR$_{WB}$', title_fontsize=9)
-
-    # ---- Panel C: Combined  ----
-    ax3 = axes[2]
-    ax3.set_facecolor('#f0f0f0')
-
-    # Background: SVPF grey if available
-    if svpf_column in stu.columns:
-        svpf_vals = stu[svpf_column].fillna(0).values
-        svpf_classes, _ = classify_risk_values(svpf_vals, n_iterations)
-        for cls in range(5):
-            mask = svpf_classes == cls
-            if mask.any():
-                stu[mask].plot(ax=ax3, color=SVPF_COLORS[cls],
-                               edgecolor='#aaaaaa', linewidth=0.5, alpha=0.6)
-    else:
-        stu.plot(ax=ax3, color='#e0e0e0',
-                 edgecolor='#aaaaaa', linewidth=0.5, alpha=0.5)
-
-    # Overlay: dual-layer blending (yellow PFRMA + purple PFRWB)
-    pfrma_norm = _normalize_values(pfrma_vals)
-    pfrwb_norm = _normalize_values(pfrwb_vals)
-    _plot_risk_layers(ax3, bld, pfrma_norm, pfrwb_norm,
-                      has_pfrma, has_pfrwb, plot_no_risk=False)
-
-    ax3.set_xlim(xlim)
-    ax3.set_ylim(ylim)
-
-    if basemap:
-        _add_basemap(ax3, alpha=0.3)
-
-    ax3.set_title(f'{title_prefix}(C) Combined PFR$_{{MA}}$ & PFR$_{{WB}}$\n+ SV$_{{PF}}$',
-                  fontsize=12, fontweight='bold')
-    ax3.axis('off')
-
-    # Combined legend
-    sv_legend = [Patch(facecolor=SVPF_COLORS[i], edgecolor='grey',
-                       label=CLASS_LABELS[i].title())
-                 for i in range(1, 5)]
-    ax3.legend(handles=sv_legend, loc='lower left', title='SV$_{PF}$',
-               fontsize=7, title_fontsize=8)
+    # ── Panel C: Combined bivariate ──
+    print(f"\n{'='*60}")
+    print(f"PANEL C: Combined bivariate")
+    print(f"{'='*60}")
+    _plot_combined_panel(
+        buildings_gdf, pfrma_column, pfrwb_column,
+        ax=axes[2], config=config,
+        title=f'{city} - (C) Combined PFR Risk',
+        statistical_units_gdf=statistical_units_gdf,
+    )
 
     plt.tight_layout()
 
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches='tight')
-        print(f"{GREEN}Saved to: {save_path}{RESET}\n")
-
-
-    print(f"PFRMA: {has_pfrma.sum()} buildings with risk")
-    print(f"PFRWB: {has_pfrwb.sum()} buildings with risk")
-    print(f"Both: {(has_pfrma & has_pfrwb).sum()} buildings with both risks")
-    #TODO need to check with CS3
-    print(f"{RED}#TODO need to check with CS3{RESET}\n")
-    print(f"Only PFRMA: {(has_pfrma & ~has_pfrwb).sum()} buildings")
-    print(f"Only PFRWB: {(~has_pfrma & has_pfrwb).sum()} buildings")
+        print(f"\n✅ Saved to: {save_path}")
 
     return fig, axes
+
+
+def _plot_combined_panel(buildings_gdf, pfrma_column, pfrwb_column,
+                         ax, config=None, title=None,
+                         statistical_units_gdf=None):
+    """
+    Panel C: Combined bivariate risk (PFRMA × PFRWB blended).
+
+    Buildings are colored by blending their PFRMA (yellow/orange) and
+    PFRWB (purple/wine) classifications.
+    """
+    ma_vals = buildings_gdf[pfrma_column].fillna(0).values
+    wb_vals = buildings_gdf[pfrwb_column].fillna(0).values
+
+    # Classify each independently
+    ma_classes, _, ma_colors, _ = classify_values(
+        ma_vals, risk_type='PFRMA', config=config
+    )
+    wb_classes, _, wb_colors, _ = classify_values(
+        wb_vals, risk_type='PFRWB', config=config
+    )
+
+    # Background
+    if statistical_units_gdf is not None:
+        statistical_units_gdf.plot(
+            ax=ax, facecolor='#f5f5f5', edgecolor='#cccccc', linewidth=0.3,
+        )
+
+    # Blend colors per building
+    n = len(buildings_gdf)
+    facecolors = np.ones((n, 4))  # RGBA, start white
+
+    for i in range(n):
+        ma_c = mcolors.to_rgba(ma_colors[ma_classes[i]])
+        wb_c = mcolors.to_rgba(wb_colors[wb_classes[i]])
+
+        # Additive blend — if both risks present, color darkens
+        if ma_classes[i] == 0 and wb_classes[i] == 0:
+            facecolors[i] = [1, 1, 1, 1]  # white
+        elif ma_classes[i] == 0:
+            facecolors[i] = wb_c
+        elif wb_classes[i] == 0:
+            facecolors[i] = ma_c
+        else:
+            # Blend: average the two risk colors
+            r = (ma_c[0] + wb_c[0]) / 2
+            g = (ma_c[1] + wb_c[1]) / 2
+            b = (ma_c[2] + wb_c[2]) / 2
+            # Darken slightly when both present
+            darken = 0.85
+            facecolors[i] = [r * darken, g * darken, b * darken, 1.0]
+
+    # Plot buildings one by one with blended colors
+    for idx, (_, row) in enumerate(buildings_gdf.iterrows()):
+        geom = row.geometry
+        # Handle both Polygon and MultiPolygon
+        if geom.geom_type == 'MultiPolygon':
+            for part in geom.geoms:
+                ax.fill(
+                    *part.exterior.xy,
+                    facecolor=facecolors[idx],
+                    edgecolor='black',
+                    linewidth=0.5,
+                )
+        elif geom.geom_type == 'Polygon':
+            ax.fill(
+                *geom.exterior.xy,
+                facecolor=facecolors[idx],
+                edgecolor='black',
+                linewidth=0.5,
+            )
+
+    # Bivariate legend (simplified 3×3 grid)
+    _add_bivariate_legend(ax, ma_colors, wb_colors)
+
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold')
+    ax.axis('off')
+
+    ax.text(0.01, 0.02, '(C) OpenStreetMap contributors\n(C) CARTO',
+            transform=ax.transAxes, fontsize=6, color='grey',
+            verticalalignment='bottom')
+
+
+def _add_bivariate_legend(ax, ma_colors, wb_colors):
+    """Add a small bivariate legend grid to the axes."""
+    # Build 3×3 mini-grid (Low/Med/High for each axis)
+    legend_indices = [1, 2, 4]  # low, medium, very high from the 5-class scheme
+
+    bbox = ax.get_position()
+    lx = bbox.x0 + 0.01
+    ly = bbox.y0 + 0.01
+    lw, lh = 0.12, 0.12
+
+    leg_ax = ax.figure.add_axes([lx, ly, lw, lh])
+
+    grid = np.ones((3, 3, 4))  # 3×3 RGBA
+    for row in range(3):      # PFRWB axis (y)
+        for col in range(3):  # PFRMA axis (x)
+            ma_c = mcolors.to_rgba(ma_colors[legend_indices[col]])
+            wb_c = mcolors.to_rgba(wb_colors[legend_indices[row]])
+            # Blend
+            r = (ma_c[0] + wb_c[0]) / 2
+            g = (ma_c[1] + wb_c[1]) / 2
+            b = (ma_c[2] + wb_c[2]) / 2
+            grid[row, col] = [r * 0.85, g * 0.85, b * 0.85, 1.0]
+
+    leg_ax.imshow(grid, origin='lower', aspect='auto', interpolation='nearest')
+    leg_ax.set_xticks([0, 2])
+    leg_ax.set_xticklabels(['Low', 'High'], fontsize=6)
+    leg_ax.set_yticks([0, 2])
+    leg_ax.set_yticklabels(['Low', 'High'], fontsize=6)
+    leg_ax.set_xlabel('PFR$_{MA}$', fontsize=7, labelpad=2)
+    leg_ax.set_ylabel('PFR$_{WB}$', fontsize=7, labelpad=2)
+    leg_ax.tick_params(length=0)
+    for spine in leg_ax.spines.values():
+        spine.set_linewidth(0.5)
+
+
+# =====================================================================
+#  SINGLE PFRWB PLOT — for direct comparison with ArcGIS experiment
+# =====================================================================
+
+def plot_pfrwb_building_level(buildings_gdf, pfrwb_column='PFRWB',
+                               ax=None, figsize=(10, 10),
+                               title='Hamburg - (B) PFR$_{WB}$ Risk\n(Well-being)',
+                               config=None,
+                               statistical_units_gdf=None,
+                               edgecolor='black', linewidth=0.5,
+                               show_basemap=True,
+                               save_path=None, dpi=300):
+    """
+    Plot PFRWB at building level — for direct comparison with ArcGIS output.
+
+    Use pfrwb_column='PFRWB' (not smoothed) to match the author's
+    "experiment without smooth" visualization.
+
+    Parameters
+    ----------
+    buildings_gdf : GeoDataFrame
+        Buildings with PFRWB column (raw, unnormalized values).
+    pfrwb_column : str
+        Column to plot. 'PFRWB' for unsmoothed, 'PFRWB_smoothed' for smoothed.
+    config : dict, optional
+        Config with fixed_thresholds for exact ArcGIS match.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        fig = ax.figure
+
+    print(f"\n{'='*60}")
+    print(f"PFRWB Building-Level Plot: {pfrwb_column}")
+    print(f"{'='*60}")
+
+    plot_risk_panel(
+        buildings_gdf, pfrwb_column, 'PFRWB',
+        ax=ax, config=config,
+        title=title,
+        statistical_units_gdf=statistical_units_gdf,
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        show_basemap=show_basemap,
+    )
+
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches='tight')
+        print(f"\n✅ Saved to: {save_path}")
+
+    return fig, ax

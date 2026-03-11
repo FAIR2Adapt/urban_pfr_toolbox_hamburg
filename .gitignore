@@ -18,6 +18,8 @@ venv/
 # Docker
 .dockerignore
 
+#data
+outputs/
 # IDEs
 .vscode/
 .idea/

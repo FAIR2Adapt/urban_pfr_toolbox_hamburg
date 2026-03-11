@@ -42,8 +42,8 @@ outputs/
 *.dbf
 *.prj
 *.cpg
-*.qpj
-*.gpkg
+#*.qpj
+#*.gpkg
 
 # Temporary
 *.tmp

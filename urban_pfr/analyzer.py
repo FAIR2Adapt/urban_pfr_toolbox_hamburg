@@ -9,6 +9,7 @@ from .indicators import compute_social_vulnerability
 from .exposure import calculate_exposure_residents, calculate_exposure_wellbeing
 from .hazard import calculate_hazard_mobility_accessibility, calculate_hazard_wellbeing
 from .risk import calculate_risk, delaunay_smoothing
+from .thiessen import create_thiessen_polygons
 
 warnings.filterwarnings('ignore')
 
@@ -156,17 +157,24 @@ class PFRAnalyzer:
 
     def compute_exposure(self):
         schema = self.config.get('schema', {})
+        exposure_cfg = self.config.get('exposure_settings', {})
+        residential_types = exposure_cfg.get('residential_types', [1])
+        floor_deduction = exposure_cfg.get('non_residential_floor_deduction', 1)
+
         self.buildings = calculate_exposure_residents(
             self.buildings, self.statistical_units,
             residents_col=schema.get('residents_col', 'Residents'),
             living_area_col=schema.get('living_area_col', 'LivingArea'),
             floors_col=schema.get('floors_col', 'Floors'),
-            building_type_col=schema.get('building_type_col', 'Building_type')
+            building_type_col=schema.get('building_type_col', 'Building_type'),
+            residential_types=residential_types,
+            non_residential_floor_deduction=floor_deduction,
         )
         self.buildings = calculate_exposure_wellbeing(
             self.buildings,
             floors_col=schema.get('floors_col', 'Floors'),
-            building_type_col=schema.get('building_type_col', 'Building_type')
+            building_type_col=schema.get('building_type_col', 'Building_type'),
+            residential_types=residential_types,
         )
         return self
 
@@ -222,7 +230,23 @@ class PFRAnalyzer:
         )
         return self
 
-    def run_pipeline(self, skip_smoothing=False):
+    def apply_thiessen(self):
+        """Replace building footprints with Thiessen polygons for visualization."""
+        paths = self.config.get('project', {}).get('paths', {})
+        boundary_file = paths.get('boundary_file')
+
+        boundary = None
+        if boundary_file and Path(boundary_file).exists():
+            print(f"  Loading boundary from {boundary_file}")
+            boundary = gpd.read_file(boundary_file)
+            boundary = self._ensure_crs(boundary, "boundary")
+
+        self.buildings = create_thiessen_polygons(
+            self.buildings, boundary=boundary
+        )
+        return self
+
+    def run_pipeline(self, skip_smoothing=False, skip_thiessen=False):
         """Run all steps. Returns (buildings_gdf, statistical_units_gdf)."""
         print("Running PFR pipeline...")
         self.compute_vulnerability()
@@ -235,6 +259,9 @@ class PFRAnalyzer:
             self.buildings['PFRWB_smoothed'] = self.buildings['PFRWB']
         else:
             self.apply_smoothing()
+
+        if not skip_thiessen:
+            self.apply_thiessen()
 
         print("Pipeline complete.")
         return self.buildings, self.statistical_units
@@ -258,7 +285,7 @@ class PFRAnalyzer:
             config=self.config
         )
 
-    def save_results(self, output_dir=None, format='gpkg'):
+    def save_results(self, output_dir=None, format='gpkg', web_export=True):
         if self.buildings is None or self.statistical_units is None:
             raise ValueError("Must run pipeline before saving results")
 
@@ -277,5 +304,31 @@ class PFRAnalyzer:
         self.buildings.to_file(b_path, driver=driver)
         self.statistical_units.to_file(s_path, driver=driver)
 
+        paths = {'buildings': b_path, 'statistical_units': s_path}
+
+        # Export web-ready FlatGeobuf in EPSG:4326
+        if web_export:
+            try:
+                b_fgb = f"{output_dir}/buildings_with_risk.fgb"
+                s_fgb = f"{output_dir}/statistical_units_with_vulnerability.fgb"
+
+                bldg_4326 = self.buildings.to_crs('EPSG:4326')
+                bldg_4326 = bldg_4326.dropna(subset=['geometry'])
+                bldg_4326 = bldg_4326[~bldg_4326.geometry.is_empty]
+                bldg_4326 = bldg_4326.explode(index_parts=False).reset_index(drop=True)
+                bldg_4326 = bldg_4326[bldg_4326.geom_type == 'Polygon']
+                bldg_4326.to_file(b_fgb, driver='FlatGeobuf')
+
+                stats_4326 = self.statistical_units.to_crs('EPSG:4326')
+                stats_4326 = stats_4326.dropna(subset=['geometry'])
+                stats_4326 = stats_4326[~stats_4326.geometry.is_empty]
+                stats_4326.to_file(s_fgb, driver='FlatGeobuf')
+
+                paths['buildings_fgb'] = b_fgb
+                paths['statistical_units_fgb'] = s_fgb
+                print(f"Web export (FlatGeobuf/EPSG:4326) saved")
+            except Exception as e:
+                print(f"Web export skipped: {e}")
+
         print(f"Results saved to {output_dir}")
-        return {'buildings': b_path, 'statistical_units': s_path}
+        return paths

@@ -15,22 +15,37 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
                                  living_area_col='LivingArea',
                                  floors_col='Floors',
                                  building_type_col='Building_type',
-                                 stat_unit_col='StatisticalUnit'):
+                                 stat_unit_col='StatisticalUnit',
+                                 residential_types=None,
+                                 non_residential_floor_deduction=1):
     """
     Distribute statistical-unit population to individual buildings
     proportionally by residential floor area.
+
+    Parameters
+    ----------
+    residential_types : list, optional
+        Building type values considered residential (default: [1]).
+        Residential buildings use all floors; non-residential buildings
+        have `non_residential_floor_deduction` floors deducted.
+    non_residential_floor_deduction : int
+        Number of floors deducted for non-residential buildings (default: 1).
     """
     buildings_result = buildings_gdf.copy()
+    if residential_types is None:
+        residential_types = [1]
 
     required_cols = [floors_col, building_type_col]
     missing = [c for c in required_cols if c not in buildings_result.columns]
     if missing:
         raise ValueError(f"Missing columns in buildings: {missing}")
 
-    # Vectorized residential floor area per building
+    # Residential floor area: residential types use all floors,
+    # non-residential types lose `non_residential_floor_deduction` floors
+    is_residential = buildings_result[building_type_col].isin(residential_types)
+    deduction = np.where(is_residential, 0, non_residential_floor_deduction)
     buildings_result['Area_house'] = (
-        (buildings_result[floors_col] - (buildings_result[building_type_col] - 1))
-        * buildings_result.geometry.area
+        (buildings_result[floors_col] - deduction) * buildings_result.geometry.area
     )
     buildings_result.loc[buildings_result['Area_house'] < 0, 'Area_house'] = 0
 
@@ -90,19 +105,28 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
 def calculate_exposure_wellbeing(buildings_gdf,
                                  floors_col='Floors',
                                  building_type_col='Building_type',
-                                 residents_col='R'):
+                                 residents_col='R',
+                                 residential_types=None):
     """
     Ground floor residents (EWB).
+
+    Parameters
+    ----------
+    residential_types : list, optional
+        Building type values considered residential (default: [1]).
+        Only residential buildings get ground-floor residents.
     """
     buildings_result = buildings_gdf.copy()
+    if residential_types is None:
+        residential_types = [1]
 
     required_cols = [floors_col, building_type_col, residents_col]
     missing = [c for c in required_cols if c not in buildings_result.columns]
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    # ── Fully vectorized ──
-    mask = (buildings_result[building_type_col] == 1) & (buildings_result[floors_col] > 0)
+    # Only residential buildings get ground-floor residents
+    mask = (buildings_result[building_type_col].isin(residential_types)) & (buildings_result[floors_col] > 0)
 
     buildings_result['R_G'] = 0.0
     buildings_result.loc[mask, 'R_G'] = (

@@ -5,6 +5,7 @@ Risk calculation (PFRMA, PFRWB) and Delaunay smoothing.
 import numpy as np
 import pandas as pd
 from scipy.spatial import Delaunay
+from scipy import sparse
 
 
 def calculate_risk(buildings_gdf,
@@ -179,45 +180,48 @@ def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
         print(f"  ⚠️  Delaunay failed: {e} — skipping smoothing")
         return values
 
-    # Build adjacency list from triangulation
+    # Build adjacency from triangulation using sparse matrix (vectorized)
     n = len(values)
-    neighbors = [set() for _ in range(n)]
+    rows, cols = [], []
     for simplex in tri.simplices:
         for i in range(3):
-            for j in range(i + 1, 3):
-                p1, p2 = simplex[i], simplex[j]
-                dist = np.linalg.norm(coords[p1] - coords[p2])
-                if dist <= distance_threshold:
-                    neighbors[p1].add(p2)
-                    neighbors[p2].add(p1)
+            for j in range(3):
+                if i != j:
+                    rows.append(simplex[i])
+                    cols.append(simplex[j])
 
-    # Limit neighbors
-    for i in range(n):
-        if len(neighbors[i]) > max_neighbors:
-            nbrs = list(neighbors[i])
-            dists = [np.linalg.norm(coords[j] - coords[i]) for j in nbrs]
-            sorted_nbrs = [nb for _, nb in sorted(zip(dists, nbrs))]
-            neighbors[i] = set(sorted_nbrs[:max_neighbors])
+    rows = np.array(rows)
+    cols = np.array(cols)
 
-    # Iterative smoothing
+    # Compute distances and filter by threshold
+    dists = np.sqrt(
+        (coords[rows, 0] - coords[cols, 0]) ** 2 +
+        (coords[rows, 1] - coords[cols, 1]) ** 2
+    )
+    mask = dists < distance_threshold
+    rows, cols, dists = rows[mask], cols[mask], dists[mask]
+
+    # Weights = 1 / (distance + epsilon)
+    weights = 1.0 / (dists + 1e-10)
+
+    # Build sparse weight matrix and row-normalize
+    W = sparse.coo_matrix((weights, (rows, cols)), shape=(n, n)).tocsr()
+    row_sums = np.array(W.sum(axis=1)).flatten()
+    has_neighbors = row_sums > 0  # track before modifying for normalization
+    row_sums_safe = row_sums.copy()
+    row_sums_safe[row_sums_safe == 0] = 1
+    D_inv = sparse.diags(1.0 / row_sums_safe)
+    W_norm = D_inv @ W
+
+    # Iterative smoothing: blend_weight * neighbor_avg + (1 - blend_weight) * original
+    # Only blend buildings that have neighbors; isolated buildings keep their value.
     for iteration in range(n_iterations):
+        smoothed = W_norm @ values
         new_values = values.copy()
-        for i in range(n):
-            if len(neighbors[i]) == 0:
-                continue
-
-            nbr_list = list(neighbors[i])
-            distances = np.array([
-                np.linalg.norm(coords[j] - coords[i]) for j in nbr_list
-            ])
-            weights = 1.0 / (distances + 1e-10)
-
-            nbr_vals = np.array([values[j] for j in nbr_list])
-            weighted_avg = np.sum(nbr_vals * weights) / np.sum(weights)
-
-            # Blend: mostly smoothed, partially original
-            new_values[i] = blend_weight * weighted_avg + (1 - blend_weight) * values[i]
-
+        new_values[has_neighbors] = (
+            blend_weight * smoothed[has_neighbors] +
+            (1 - blend_weight) * values[has_neighbors]
+        )
         values = new_values
 
     return values

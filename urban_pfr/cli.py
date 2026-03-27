@@ -104,6 +104,93 @@ def _run_local(args):
     print(f"\n{GREEN}Done. Results in {output_dir}{RESET}")
 
 
+# FDO mode (RO-Crate in / RO-Crate out)
+def _run_fdo(args):
+    """FDO mode: resolve RO-Crate inputs, run pipeline, create output crate."""
+    from fdo_resolver import FDOResolver
+
+    workflow_crate = Path(args.workflow_crate)
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Resolve FDO inputs
+    log("Reading Workflow RO-Crate profile...")
+    resolver = FDOResolver.from_workflow_crate(str(workflow_crate))
+
+    log(f"Resolving input RO-Crates from {input_dir}...")
+    result = resolver.resolve(str(input_dir))
+
+    if not result.is_complete:
+        missing = [p.name for p in result.unmatched_params if p.value_required]
+        print(f"{RED}Missing required inputs: {', '.join(missing)}{RESET}")
+        print(result.summary())
+        sys.exit(1)
+
+    log("Resolved inputs:")
+    print(result.summary())
+
+    # 2. Build config from resolved paths
+    config_path = result.paths.get("config")
+    if not config_path:
+        print(f"{RED}No config file resolved from input crates.{RESET}")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    paths = config.setdefault("project", {}).setdefault("paths", {})
+
+    # Clear existing paths and set from resolver
+    for k in list(paths.keys()):
+        if k != "output_dir":
+            del paths[k]
+
+    for param_name, resolved_path in result.paths.items():
+        if param_name == "config":
+            continue
+        elif param_name == "flood_levels":
+            paths["flood_dir"] = str(resolved_path)
+        elif param_name == "buildings_gdb":
+            paths["input_gdb"] = str(resolved_path)
+        elif param_name == "boundary":
+            paths["boundary_file"] = str(resolved_path)
+        else:
+            paths[param_name] = str(resolved_path)
+
+    paths["output_dir"] = str(output_dir)
+
+    # 3. Run pipeline
+    _run_pipeline(config, str(output_dir), skip_validation=args.skip_validation)
+
+    # 4. Create output Workflow Run Crate
+    log("Creating output Workflow Run Crate...")
+    city = config.get("project", {}).get("city_name", "Unknown")
+
+    output_files = {}
+    for f in sorted(output_dir.glob("*")):
+        if f.is_file() and f.name != "ro-crate-metadata.json":
+            # Use filename (not stem) as key to avoid duplicates between .gpkg and .fgb
+            desc = f.stem.replace("_", " ").title()
+            if f.suffix:
+                desc += f" ({f.suffix.lstrip('.')})"
+            output_files[desc] = f
+
+    resolver.create_run_crate(
+        str(output_dir),
+        name=f"{city} Pluvial Flood Risk Assessment Results",
+        description=(
+            f"Output from the urban_pfr pipeline for {city}. "
+            f"Contains flood risk indices (PFRMA, PFRWB) and social vulnerability (SVPF)."
+        ),
+        bindings=result,
+        output_files=output_files,
+    )
+
+    log(f"Output RO-Crate written to {output_dir}/ro-crate-metadata.json")
+    print(f"\n{GREEN}Done. Results in {output_dir}{RESET}")
+
+
 # Docker mode
 def _run_docker(args):
     """Docker mode: auto-detect inputs at /mnt/inputs/, output to /mnt/outputs/."""
@@ -407,6 +494,21 @@ Examples:
     p_docker = sub.add_parser("docker", help="Run inside Docker container")
     _add_common_args(p_docker)
 
+    p_fdo = sub.add_parser("fdo", help="Run with RO-Crate FDO inputs/outputs")
+    p_fdo.add_argument(
+        "--workflow-crate", default=".",
+        help="Path to the Workflow RO-Crate (default: current directory)",
+    )
+    p_fdo.add_argument(
+        "--input-dir", default="/mnt/inputs",
+        help="Directory containing input data RO-Crates (default: /mnt/inputs)",
+    )
+    p_fdo.add_argument(
+        "--output-dir", default="/mnt/outputs",
+        help="Directory for the output Workflow Run Crate (default: /mnt/outputs)",
+    )
+    _add_common_args(p_fdo)
+
     return parser
 
 
@@ -425,5 +527,7 @@ def main(argv=None):
             sys.exit(1)
     elif args.mode == "docker":
         _run_docker(args)
+    elif args.mode == "fdo":
+        _run_fdo(args)
     else:
         _run_local(args)

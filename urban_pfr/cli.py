@@ -27,8 +27,7 @@ RESET  = "\033[0m"
 
 # Docker contract
 CONFIG_PATH    = Path("/mnt/inputs/config.yaml")
-GDB_ZIP_PATH   = Path("/mnt/inputs/pluvialfloodriskmap.gdb.zip")
-FLOOD_ZIP_PATH = Path("/mnt/inputs/Floodlevels.zip")
+INPUT_DIR      = Path("/mnt/inputs")
 OUTPUT_DIR     = Path("/mnt/outputs")
 OUTPUT_ZIP     = OUTPUT_DIR / "outputs.zip"
 
@@ -107,35 +106,28 @@ def _run_local(args):
 
 # Docker mode
 def _run_docker(args):
-    """Docker mode: fixed mount paths, zip inputs/outputs."""
+    """Docker mode: auto-detect inputs at /mnt/inputs/, output to /mnt/outputs/."""
     log(f"Looking for config at {CONFIG_PATH}")
     if not CONFIG_PATH.exists():
         print(f"{RED}Config file not found:{RESET} {CONFIG_PATH}")
         sys.exit(1)
 
-    if not GDB_ZIP_PATH.exists():
-        print(f"{RED}Missing input:{RESET} {GDB_ZIP_PATH}")
-        sys.exit(1)
-    if not FLOOD_ZIP_PATH.exists():
-        print(f"{RED}Missing input:{RESET} {FLOOD_ZIP_PATH}")
-        sys.exit(1)
-
     with open(CONFIG_PATH, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
-    # Force wrapper contract paths (ignore YAML paths)
-    config = _force_fixed_paths(config)
-
-    # Unzip inputs (because config paths are ZIPs)
+    # Auto-detect and resolve inputs
     try:
-        config = _resolve_zip_inputs_in_config(config)
+        config = _resolve_inputs(config)
     except Exception as e:
         print(f"{RED}Input preparation failed:{RESET} {e}")
         sys.exit(1)
 
+    # Force output dir
+    config.setdefault("project", {}).setdefault("paths", {})["output_dir"] = str(OUTPUT_DIR)
+
     _run_pipeline(config, str(OUTPUT_DIR), skip_validation=args.skip_validation)
 
-    # 5. Zip outputs
+    # Zip outputs
     _zip_dir(zip_path=OUTPUT_ZIP, source_dir=OUTPUT_DIR)
     print(f"\n{GREEN}Done successfully.{RESET}")
 
@@ -162,59 +154,158 @@ def _unzip_to_dir(zip_path: Path, dest_dir: Path) -> Path:
     return dest_dir
 
 
-def _force_fixed_paths(config: dict) -> dict:
+def _resolve_inputs(config: dict) -> dict:
     """
-    Force wrapper I/O contract paths into the config, ignoring YAML paths in case it exist.
+    Auto-detect input data at /mnt/inputs/ in this priority order:
+
+    0. RO-Crate FDOs (directories with ro-crate-metadata.json)
+
+    For the GDB (buildings, statistical units, streets):
+      1. Config paths.input_gdb (if set and exists)
+      2. *.gdb directory in INPUT_DIR
+      3. *.gdb.zip in INPUT_DIR (extracted automatically)
+      4. Individual files: paths.buildings, paths.statistical_units, paths.streets
+
+    For flood layers:
+      1. Config paths.flood_dir (if set and exists)
+      2. Directory containing Flood_*.geojson/shp/gpkg in INPUT_DIR
+      3. Floodlevels.zip in INPUT_DIR (extracted automatically)
+      4. *.zip containing Flood_* files (extracted automatically)
+
+    For boundary (optional):
+      1. Config paths.boundary_file (if set and exists)
+      2. *boundary*.gpkg in INPUT_DIR
     """
     project = config.setdefault("project", {})
     paths = project.setdefault("paths", {})
 
-    paths["input_gdb"] = str(GDB_ZIP_PATH)
-    paths["flood_dir"] = str(FLOOD_ZIP_PATH)
-    paths["output_dir"] = str(OUTPUT_DIR)
+    # --- Try RO-Crate FDOs first ---
+    try:
+        from urban_pfr.rocrate_io import resolve_rocrate_inputs, resolve_to_config_paths
+        resolved = resolve_rocrate_inputs(INPUT_DIR)
+        if resolved:
+            log("Inputs resolved from RO-Crate FDOs")
+            crate_paths = resolve_to_config_paths(resolved)
+            paths.update(crate_paths)
+            return config
+    except ImportError:
+        pass  # rocrate not available, continue with other methods
 
-    log(f"Forced paths: {paths}")
-    return config
-
-
-def _resolve_zip_inputs_in_config(config: dict) -> dict:
-    """
-    Unzip the fixed ZIP inputs and patch config to point to extracted content.
-    - input_gdb ZIP -> points to first *.gdb found inside
-    - flood_dir ZIP -> points to folder that contains Flood_* files
-    """
-    project = config.setdefault("project", {})
-    paths = project.setdefault("paths", {})
-
+    # --- Resolve GDB ---
+    gdb_resolved = False
     input_gdb = paths.get("input_gdb")
-    if input_gdb and str(input_gdb).lower().endswith(".zip"):
-        zip_path = Path(input_gdb)
-        unzip_dir = zip_path.with_suffix("")  # /mnt/inputs/pluvialfloodriskmap.gdb
-        _unzip_to_dir(zip_path, unzip_dir)
 
-        gdbs = list(unzip_dir.rglob("*.gdb"))
-        if not gdbs:
-            raise FileNotFoundError(f"No .gdb found after unzip: {zip_path}")
-        paths["input_gdb"] = str(gdbs[0])
-        log(f"Resolved input_gdb -> {paths['input_gdb']}")
+    # Check if config path already works
+    if input_gdb and Path(input_gdb).exists() and not str(input_gdb).endswith(".zip"):
+        log(f"Using config input_gdb: {input_gdb}")
+        gdb_resolved = True
 
-    flood_dir = paths.get("flood_dir")
-    if flood_dir and str(flood_dir).lower().endswith(".zip"):
-        zip_path = Path(flood_dir)
-        unzip_dir = zip_path.with_suffix("")  # /mnt/inputs/Floodlevels
-        _unzip_to_dir(zip_path, unzip_dir)
+    # Search for .gdb directory
+    if not gdb_resolved:
+        gdbs = list(INPUT_DIR.glob("*.gdb"))
+        if gdbs:
+            paths["input_gdb"] = str(gdbs[0])
+            log(f"Found GDB directory: {gdbs[0]}")
+            gdb_resolved = True
 
-        candidates = (
-            list(unzip_dir.rglob("Flood_*.shp")) +
-            list(unzip_dir.rglob("Flood_*.gpkg")) +
-            list(unzip_dir.rglob("Flood_*.geojson"))
+    # Search for .gdb.zip and extract
+    if not gdb_resolved:
+        gdb_zips = list(INPUT_DIR.glob("*.gdb.zip"))
+        if not gdb_zips:
+            gdb_zips = [f for f in INPUT_DIR.glob("*.zip")
+                        if "flood" not in f.name.lower()]
+        if gdb_zips:
+            zip_path = gdb_zips[0]
+            unzip_dir = zip_path.with_suffix("").with_suffix("")
+            _unzip_to_dir(zip_path, unzip_dir)
+            found = list(unzip_dir.rglob("*.gdb"))
+            if found:
+                paths["input_gdb"] = str(found[0])
+                log(f"Extracted GDB: {found[0]}")
+                gdb_resolved = True
+
+    # Check for individual files (GeoJSON, GPKG, SHP)
+    if not gdb_resolved:
+        for key, patterns in [
+            ("buildings", ["buildings.*", "Building*.*", "Gebaeude*.*"]),
+            ("statistical_units", ["statistical*.*", "StatisticalUnit*.*"]),
+            ("streets", ["streets.*", "Streets.*", "Strassen*.*"]),
+        ]:
+            if paths.get(key) and Path(paths[key]).exists():
+                continue
+            for pattern in patterns:
+                found = list(INPUT_DIR.glob(pattern))
+                found = [f for f in found if f.suffix in (".geojson", ".gpkg", ".shp")]
+                if found:
+                    paths[key] = str(found[0])
+                    log(f"Found {key}: {found[0]}")
+                    break
+
+    if not gdb_resolved and not any(paths.get(k) for k in ["buildings", "statistical_units"]):
+        raise FileNotFoundError(
+            f"No GDB, zip, or individual data files found in {INPUT_DIR}. "
+            f"Provide a .gdb directory, .gdb.zip, or individual .geojson/.gpkg/.shp files."
         )
-        if not candidates:
-            raise FileNotFoundError(f"No Flood_* layers found after unzip: {zip_path}")
 
-        paths["flood_dir"] = str(candidates[0].parent)
-        log(f"Resolved flood_dir -> {paths['flood_dir']}")
+    # --- Resolve flood layers ---
+    flood_resolved = False
+    flood_dir = paths.get("flood_dir")
 
+    # Check if config path already works
+    if flood_dir and Path(flood_dir).is_dir():
+        flood_files = list(Path(flood_dir).glob("Flood_*"))
+        if flood_files:
+            log(f"Using config flood_dir: {flood_dir}")
+            flood_resolved = True
+
+    # Search for Flood_* files directly in INPUT_DIR
+    if not flood_resolved:
+        flood_files = (
+            list(INPUT_DIR.rglob("Flood_*.geojson")) +
+            list(INPUT_DIR.rglob("Flood_*.gpkg")) +
+            list(INPUT_DIR.rglob("Flood_*.shp"))
+        )
+        if flood_files:
+            paths["flood_dir"] = str(flood_files[0].parent)
+            log(f"Found flood layers in: {flood_files[0].parent}")
+            flood_resolved = True
+
+    # Search for flood zip and extract
+    if not flood_resolved:
+        flood_zips = list(INPUT_DIR.glob("*[Ff]lood*.zip"))
+        if not flood_zips:
+            flood_zips = [f for f in INPUT_DIR.glob("*.zip")
+                          if "gdb" not in f.name.lower()]
+        if flood_zips:
+            zip_path = flood_zips[0]
+            unzip_dir = zip_path.with_suffix("")
+            _unzip_to_dir(zip_path, unzip_dir)
+            found = (
+                list(unzip_dir.rglob("Flood_*.geojson")) +
+                list(unzip_dir.rglob("Flood_*.gpkg")) +
+                list(unzip_dir.rglob("Flood_*.shp"))
+            )
+            if found:
+                paths["flood_dir"] = str(found[0].parent)
+                log(f"Extracted flood layers: {found[0].parent}")
+                flood_resolved = True
+
+    if not flood_resolved:
+        raise FileNotFoundError(
+            f"No flood layers found in {INPUT_DIR}. "
+            f"Provide Flood_*.geojson files, a Floodlevels/ directory, or a .zip archive."
+        )
+
+    # --- Resolve boundary (optional) ---
+    boundary = paths.get("boundary_file")
+    if not boundary or not Path(boundary).exists():
+        boundary_files = list(INPUT_DIR.glob("*boundary*.*")) + list(INPUT_DIR.glob("*Boundary*.*"))
+        boundary_files = [f for f in boundary_files if f.suffix in (".gpkg", ".geojson", ".shp")]
+        if boundary_files:
+            paths["boundary_file"] = str(boundary_files[0])
+            log(f"Found boundary: {boundary_files[0]}")
+
+    log(f"Resolved paths: {paths}")
     return config
 
 

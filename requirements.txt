@@ -17,5 +17,9 @@ contextily>=1.1.0
 # Configuration
 pyyaml>=5.4.0
 
+# FAIR Digital Objects (RO-Crate)
+rocrate>=0.9.0
+rohub>=1.0.0
+
 
 

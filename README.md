@@ -120,17 +120,68 @@ urban-pfr local data/inputs/config.yaml
 
 ### Via Docker (LifeWatch platform)
 
-Place inputs in `data/inputs/`:
-- `config.yaml`
-- `Floodlevels.zip`
-- `pluvialfloodriskmap.gdb.zip`
+Place inputs in `data/inputs/` and run:
 
 ```bash
 ./bin/build-image
 ./bin/execute
 ```
 
-The Docker entry point auto-detects mount paths at `/mnt/inputs/` and `/mnt/outputs/`, extracts zipped inputs, runs the pipeline, and zips the outputs.
+The Docker entry point auto-detects inputs at `/mnt/inputs/` and writes results to `/mnt/outputs/outputs.zip`. It accepts multiple input formats:
+
+**Option A — Zipped archives (original LifeWatch format):**
+```
+data/inputs/
+  config.yaml
+  pluvialfloodriskmap.gdb.zip      # zipped GDB
+  Floodlevels.zip                  # zipped flood layers
+```
+
+**Option B — Unzipped GDB + flood directory:**
+```
+data/inputs/
+  config.yaml
+  pluvialfloodriskmap.gdb/         # extracted GDB directory
+  Floodlevels/                     # directory with Flood_*.geojson
+    Flood_30.geojson
+    ...
+```
+
+**Option C — Individual files (no GDB):**
+```
+data/inputs/
+  config.yaml
+  buildings.gpkg                   # or .geojson / .shp
+  statistical_units.gpkg
+  streets.gpkg
+  Flood_30.geojson                 # flood layers directly in inputs/
+  Flood_40.geojson
+  ...
+```
+
+**Option D — RO-Crate FDOs (one per input):**
+```
+data/inputs/
+  config.yaml
+  buildings/
+    ro-crate-metadata.json
+    pluvialfloodriskmap.gdb/
+  floodlevels/
+    ro-crate-metadata.json
+    Flood_30.geojson
+    Flood_40.geojson
+    ...
+  streets/
+    ro-crate-metadata.json
+    streets.gpkg
+  boundary/                        # optional
+    ro-crate-metadata.json
+    hamburg_boundary.gpkg
+```
+
+Each input is a [FAIR Digital Object](https://fairdo.org/) implemented as an [RO-Crate](https://www.researchobject.org/ro-crate/) — a directory containing a `ro-crate-metadata.json` file describing the data. The pipeline auto-detects RO-Crate inputs and maps them to the correct input slots based on the crate metadata (name, description, file types).
+
+The boundary file (`*boundary*.gpkg`) is auto-detected if present in the inputs directory.
 
 ## Required Input Data
 

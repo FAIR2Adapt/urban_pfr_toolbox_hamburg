@@ -20,7 +20,7 @@ pyyaml>=5.4.0
 # FAIR Digital Objects (RO-Crate)
 rocrate>=0.9.0
 rohub>=1.0.0
-fdo-resolver>=0.2.0
+fdo-resolver @ git+https://github.com/FAIR2Adapt/fdo-resolver.git@main
 
 # HEALPix on ellipsoid
 healpix-geo>=0.0.11

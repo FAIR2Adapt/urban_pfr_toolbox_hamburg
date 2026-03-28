@@ -1,0 +1,12 @@
+Hamburg-data/
+outputs/
+data/inputs/*.zip
+data/inputs/Floodlevels_extracted/
+data/inputs/*.gdb
+data/inputs/*.gpkg
+data_backup_original/
+input_data_hamburg_test_prepared/
+.git/
+__pycache__/
+*.egg-info/
+.pytest_cache/

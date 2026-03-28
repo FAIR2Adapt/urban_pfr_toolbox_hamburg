@@ -1,12 +1,15 @@
-FROM python:3.11.5-slim-bullseye
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.9.3
 
 WORKDIR /usr/src/app
 
+# Install Python pip
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY . .
+RUN pip install --no-cache-dir --break-system-packages -e .
 
-ENTRYPOINT ["python", "run_analysis.py"]
-
-
+ENTRYPOINT ["python3", "run_analysis.py"]

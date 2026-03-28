@@ -1,9 +1,13 @@
 
+import os
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 from pathlib import Path
 import warnings
+
+# Allow loading large GeoJSON files (e.g. 651MB Streets.geojson)
+os.environ.setdefault("OGR_GEOJSON_MAX_OBJ_SIZE", "0")
 
 from .indicators import compute_social_vulnerability
 from .exposure import calculate_exposure_residents, calculate_exposure_wellbeing
@@ -77,6 +81,11 @@ class PFRAnalyzer:
         if streets_layer is None:
             streets_layer = schema.get('streets_layer', 'Streets')
 
+        # Schema field names for dissolve fallback
+        stat_unit_col = schema.get('stat_unit_col', 'StatisticalUnit')
+        residents_col = schema.get('residents_col', 'Residents')
+        living_area_col = schema.get('living_area_col', 'LivingArea')
+
         #  Resolve file paths
         if buildings_file is None:
             buildings_file = self._resolve_file_path(
@@ -103,6 +112,24 @@ class PFRAnalyzer:
             self.statistical_units = gpd.read_file(stats_file)
         elif input_gdb and Path(input_gdb).exists():
             self.statistical_units = gpd.read_file(input_gdb, layer=stats_layer)
+        elif self.buildings is not None and stat_unit_col in self.buildings.columns:
+            # Filter out buildings with null StatisticalUnit (e.g. outlier islands)
+            n_null = self.buildings[stat_unit_col].isna().sum()
+            if n_null > 0:
+                print(f"  Dropping {n_null} buildings with null {stat_unit_col}")
+                self.buildings = self.buildings[self.buildings[stat_unit_col].notna()].reset_index(drop=True)
+
+            # Derive statistical units from buildings by dissolving
+            print(f"  Deriving statistical units from buildings (dissolve by {stat_unit_col})...")
+            stat_cols = [stat_unit_col, residents_col, living_area_col, 'geometry']
+            # Add sensitivity/coping fields if present
+            for f in schema.get('sensitivity_fields', []) + schema.get('coping_fields', []):
+                if f in self.buildings.columns and f not in stat_cols:
+                    stat_cols.append(f)
+            available = [c for c in stat_cols if c in self.buildings.columns]
+            self.statistical_units = self.buildings[available].dissolve(
+                by=stat_unit_col, as_index=False)
+            print(f"  Derived {len(self.statistical_units)} statistical units")
         else:
             raise FileNotFoundError(
                 "No statistical units source found. Set paths.statistical_units or paths.input_gdb.")
@@ -124,7 +151,7 @@ class PFRAnalyzer:
             'flood_depths', [20, 30, 40, 50, 60, 70, 80, 90, 100]
         )
         for depth in flood_depths:
-            for ext in ['.shp', '.gpkg', '.geojson']:
+            for ext in ['.fgb', '.shp', '.gpkg', '.geojson']:
                 flood_file = Path(flood_dir) / f"Flood_{depth}{ext}"
                 if flood_file.exists():
                     try:
@@ -298,37 +325,71 @@ class PFRAnalyzer:
         ext = format if format in drivers else 'gpkg'
         driver = drivers.get(ext, 'GPKG')
 
-        b_path = f"{output_dir}/buildings_with_risk.{ext}"
-        s_path = f"{output_dir}/statistical_units_with_vulnerability.{ext}"
+        paths = {}
+
+        # ── Private outputs (for municipalities) ──
+        # Full building-level data with all demographics and risk values
+        private_dir = f"{output_dir}/private"
+        Path(private_dir).mkdir(parents=True, exist_ok=True)
+
+        b_path = f"{private_dir}/buildings_with_risk.{ext}"
+        s_path = f"{private_dir}/statistical_units_with_vulnerability.{ext}"
 
         self.buildings.to_file(b_path, driver=driver)
         self.statistical_units.to_file(s_path, driver=driver)
+        paths['buildings_private'] = b_path
+        paths['statistical_units_private'] = s_path
+        print(f"  Private results (full data): {private_dir}/")
 
-        paths = {'buildings': b_path, 'statistical_units': s_path}
+        # ── Public outputs (safe to publish) ──
+        public_dir = f"{output_dir}/public"
+        Path(public_dir).mkdir(parents=True, exist_ok=True)
 
-        # Export web-ready FlatGeobuf in EPSG:4326
-        if web_export:
-            try:
-                b_fgb = f"{output_dir}/buildings_with_risk.fgb"
-                s_fgb = f"{output_dir}/statistical_units_with_vulnerability.fgb"
+        output_cfg = self.config.get('output_settings', {})
+        healpix_depth = output_cfg.get('healpix_depth', 15)
+        min_buildings = output_cfg.get('min_buildings', 3)
 
-                bldg_4326 = self.buildings.to_crs('EPSG:4326')
-                bldg_4326 = bldg_4326.dropna(subset=['geometry'])
-                bldg_4326 = bldg_4326[~bldg_4326.geometry.is_empty]
-                bldg_4326 = bldg_4326.explode(index_parts=False).reset_index(drop=True)
-                bldg_4326 = bldg_4326[bldg_4326.geom_type == 'Polygon']
-                bldg_4326.to_file(b_fgb, driver='FlatGeobuf')
+        # Risk columns (no demographics)
+        public_risk_cols = [
+            'PFRMA', 'PFRWB', 'PFRMA_smoothed', 'PFRWB_smoothed',
+            'HMA', 'HWB',
+        ]
+        available_risk = [c for c in public_risk_cols if c in self.buildings.columns]
 
-                stats_4326 = self.statistical_units.to_crs('EPSG:4326')
-                stats_4326 = stats_4326.dropna(subset=['geometry'])
-                stats_4326 = stats_4326[~stats_4326.geometry.is_empty]
-                stats_4326.to_file(s_fgb, driver='FlatGeobuf')
+        # HEALPix on WGS84 ellipsoid — equal-area, privacy-safe (default public output)
+        from .healpix_agg import aggregate_to_healpix
+        print(f"  Public risk: HEALPix depth {healpix_depth} (min {min_buildings} buildings/cell)")
+        healpix_risk = aggregate_to_healpix(
+            self.buildings, depth=healpix_depth,
+            risk_columns=available_risk, min_buildings=min_buildings,
+        )
+        # Already in EPSG:4326
+        risk_fgb = f"{public_dir}/risk_healpix.fgb"
+        healpix_risk.to_file(risk_fgb, driver='FlatGeobuf')
+        paths['risk_fgb'] = risk_fgb
 
-                paths['buildings_fgb'] = b_fgb
-                paths['statistical_units_fgb'] = s_fgb
-                print(f"Web export (FlatGeobuf/EPSG:4326) saved")
-            except Exception as e:
-                print(f"Web export skipped: {e}")
+        risk_gpkg = f"{public_dir}/risk_healpix.{ext}"
+        healpix_risk.to_crs(self.buildings.crs).to_file(risk_gpkg, driver=driver)
+        paths['risk_public'] = risk_gpkg
 
+        # Public vulnerability — also on HEALPix grid
+        vuln_columns = [c for c in ['Sensitivity', 'CopingCapacity', 'SVI', 'SVPF']
+                        if c in self.buildings.columns]
+
+        if vuln_columns:
+            print(f"  Public vulnerability: HEALPix depth {healpix_depth}")
+            healpix_vuln = aggregate_to_healpix(
+                self.buildings, depth=healpix_depth,
+                risk_columns=vuln_columns, min_buildings=min_buildings,
+            )
+            vuln_fgb = f"{public_dir}/vulnerability_healpix.fgb"
+            healpix_vuln.to_file(vuln_fgb, driver='FlatGeobuf')
+            paths['vulnerability_fgb'] = vuln_fgb
+
+            vuln_gpkg = f"{public_dir}/vulnerability_healpix.{ext}"
+            healpix_vuln.to_crs(self.buildings.crs).to_file(vuln_gpkg, driver=driver)
+            paths['vulnerability_public'] = vuln_gpkg
+
+        print(f"  Public results (HEALPix + vulnerability): {public_dir}/")
         print(f"Results saved to {output_dir}")
         return paths

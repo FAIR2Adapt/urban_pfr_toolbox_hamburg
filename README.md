@@ -107,16 +107,31 @@ pip install -e .
 
 ```bash
 pip install -e .
-python run_analysis.py local data/inputs/config.yaml
+python run_analysis.py local config.yaml
 
 # Skip validation (if CRS is already consistent)
-python run_analysis.py local data/inputs/config.yaml --skip-validation
+python run_analysis.py local config.yaml --skip-validation
 ```
 
 If the package is installed, you can also use the CLI command directly:
 ```bash
-urban-pfr local data/inputs/config.yaml
+urban-pfr local config.yaml
 ```
+
+### FDO mode (RO-Crate in / RO-Crate out)
+
+```bash
+urban-pfr fdo --input-dir ./data/inputs/ --output-dir ./outputs/hamburg/
+```
+
+In FDO mode, the pipeline:
+1. Reads the Workflow RO-Crate (`ro-crate-metadata.json` in the project root) to discover expected input parameters
+2. Scans the input directory for data RO-Crates and matches them to input slots by format, type, and [I-ADOPT](https://i-adopt.github.io/) `variableMeasured` annotations
+3. Resolves column mappings automatically via `propertyID` (I-ADOPT nanopublication URIs) — no hardcoded column names needed
+4. Runs the pipeline
+5. Creates an output Workflow Run Crate with provenance
+
+This is the recommended mode for FAIR reproducibility. See [fdo-resolver](https://github.com/FAIR2Adapt/fdo-resolver) for details on how variable matching works.
 
 ### Via Docker (LifeWatch platform)
 
@@ -300,10 +315,46 @@ exposure_settings:
 
 For example, if your data uses `"R"` for residential and `"C"` for commercial, you would first recode them to integers and set `residential_types` accordingly.
 
+### 5. Using FDO mode (recommended for FAIR reproducibility)
+
+Instead of a config YAML, you can describe your input data as RO-Crates with [I-ADOPT](https://i-adopt.github.io/) variable annotations. This eliminates hardcoded column names — the pipeline discovers the correct column mappings from the metadata.
+
+For each input dataset, create a directory with a `ro-crate-metadata.json`:
+
+```json
+{
+  "@id": "buildings.fgb",
+  "@type": "File",
+  "encodingFormat": "application/flatgeobuf",
+  "variableMeasured": [
+    {"@id": "#var-elderly"},
+    {"@id": "#var-children"}
+  ]
+}
+```
+```json
+{
+  "@id": "#var-elderly",
+  "@type": "PropertyValue",
+  "name": "Senioren",
+  "propertyID": "https://w3id.org/np/RA-iadopt-elderly-singles-placeholder"
+}
+```
+
+The `propertyID` is an I-ADOPT nanopublication URI that semantically identifies the variable. When the same `propertyID` appears in both the workflow's expected inputs and the data's `variableMeasured`, the column mapping is resolved automatically (e.g. workflow expects `elderly_singles` → data has it as `Senioren`).
+
+Then run:
+```bash
+urban-pfr fdo --input-dir ./my-city-data/ --output-dir ./outputs/my-city/
+```
+
+See `Hamburg-data/fdo/` for a complete example of input RO-Crates.
+
 ### Current limitations for new cities
 
-- **Flood layer naming** must follow `Flood_{depth_cm}.geojson` (or `.shp`, `.gpkg`), e.g., `Flood_30.geojson` for 30cm depth.
-- **Boundary file**: Without a study area boundary, Thiessen polygons extend to the convex hull of all buildings. For best results, provide the city administrative boundary as a GeoPackage.
+- **Flood layer naming** must follow `Flood_{depth_cm}.{ext}` (e.g., `Flood_30.geojson`, `Flood_50.fgb`).
+- **Boundary file**: Without a study area boundary, Thiessen polygons extend to the convex hull of all buildings. For best results, provide the city administrative boundary.
+- **Input format**: FlatGeobuf (.fgb) is recommended for large datasets (3-5x faster than GeoJSON).
 
 ## Configuration
 
@@ -323,8 +374,13 @@ schema:
   buildings_layer: "Building_ExampleLayer"
   stats_layer: "StatisticalExampleUnit"
   streets_layer: "Streets"
-  sensitivity_fields: ["WR", "C"]
-  coping_fields: ['ES', 'EDQ']
+  sensitivity_fields: ["ES", "C"]       # ArcGIS: Elderly Singles, Children
+  coping_fields: ["WR", "EDQ"]          # ArcGIS: Welfare Recipients, Education
+
+topsis_entropy:                          # Shannon entropy for TOPSIS steps
+  sensitivity: true
+  coping_capacity: true
+  svi: true
 
 hazard_settings:
   hma_buffers: [5, 15, 30]       # ring buffer distances (meters)
@@ -349,29 +405,59 @@ topsis_weights:
 
 ## Output
 
-The pipeline produces:
+The pipeline produces two output tiers:
 
-| File | Format | Description |
-|------|--------|-------------|
-| `buildings_with_risk.gpkg` | GeoPackage | Thiessen polygons with all risk columns (projected CRS) |
-| `buildings_with_risk.fgb` | FlatGeobuf | Same, in EPSG:4326 for web viewing |
-| `statistical_units_with_vulnerability.gpkg` | GeoPackage | Statistical units with SVI/SVPF |
-| `statistical_units_with_vulnerability.fgb` | FlatGeobuf | Same, in EPSG:4326 |
-| `hamburg_risk_map.png` | PNG | 3-panel publication map |
+### Public outputs (safe to publish)
 
-Key columns in the buildings output:
+```
+outputs/public/
+  risk_healpix.fgb             # HEALPix cells — risk values, EPSG:4326 for web viewer
+  risk_healpix.gpkg            # Same, projected CRS
+  vulnerability_healpix.fgb    # HEALPix cells — aggregated vulnerability, EPSG:4326
+  vulnerability_healpix.gpkg   # Same, projected CRS
+```
 
-| Column | Description |
-|--------|-------------|
-| `HMA` | Hazard Mobility & Accessibility (0–1) |
-| `HWB` | Hazard Well-Being (0–n_depths) |
-| `R` | Residents per building |
-| `R_G` | Ground-floor residents |
-| `SVPF` | Social Vulnerability to Pluvial Flooding |
-| `PFRMA` | Pluvial Flood Risk MA (raw) |
-| `PFRWB` | Pluvial Flood Risk WB (raw) |
-| `PFRMA_smoothed` | Smoothed PFRMA (Delaunay) |
-| `PFRWB_smoothed` | Smoothed PFRWB (Delaunay) |
+| Column | File | Description |
+|--------|------|-------------|
+| `PFRMA` | risk_healpix | Pluvial Flood Risk MA (mean per cell) |
+| `PFRWB` | risk_healpix | Pluvial Flood Risk WB (mean per cell) |
+| `PFRMA_smoothed` | risk_healpix | Smoothed PFRMA (mean per cell) |
+| `PFRWB_smoothed` | risk_healpix | Smoothed PFRWB (mean per cell) |
+| `HMA` | risk_healpix | Hazard Mobility & Accessibility (0–1, mean) |
+| `HWB` | risk_healpix | Hazard Well-Being (0–1, mean) |
+| `n_buildings` | both | Number of buildings in the cell |
+| `healpix_id` | both | HEALPix cell identifier (nested scheme) |
+| `Sensitivity` | vulnerability_healpix | TOPSIS sensitivity (mean per cell) |
+| `CopingCapacity` | vulnerability_healpix | TOPSIS coping capacity (mean per cell) |
+| `SVI` | vulnerability_healpix | Social Vulnerability Index (mean per cell) |
+| `SVPF` | vulnerability_healpix | Social Vulnerability to Pluvial Flooding (mean per cell) |
+
+The public layers use **HEALPix cells on the WGS84 ellipsoid** ([healpix-geo](https://github.com/IAOCEA/healpix-geo)) — equal-area cells where each aggregates multiple buildings. No individual buildings can be identified. No demographic data is included. Cells with fewer than 3 buildings (configurable `min_buildings`) are excluded for privacy.
+
+```yaml
+output_settings:
+  healpix_depth: 15          # depth 15 = ~200m cells (default)
+  min_buildings: 3           # privacy threshold
+```
+
+### Private outputs (for municipalities)
+
+```
+outputs/private/
+  buildings_with_risk.gpkg                       # Full building-level data + demographics
+  statistical_units_with_vulnerability.gpkg      # Statistical units with all indicators
+```
+
+Contains building-level risk values plus demographics (`Residents`, `ES`, `C`, `WR`, `EDQ`, `R`, `R_G`, etc.). These files should **not be published** as they contain private demographic data at individual building level.
+
+### Visualization
+
+```
+outputs/
+  hamburg_risk_map.png         # 3-panel publication map (PFRMA, PFRWB, combined)
+```
+
+A MapLibre GL JS web viewer is included in `viewer/index.html` for interactive exploration of the public FlatGeobuf outputs.
 
 ## Architecture
 
@@ -379,14 +465,19 @@ Key columns in the buildings output:
 urban_pfr/
   __init__.py          # package exports
   analyzer.py          # PFRAnalyzer orchestrator class
-  cli.py               # CLI entry point (local/docker modes)
+  cli.py               # CLI entry point (local/docker/fdo modes)
   validation.py        # input validation, CRS auto-fix
   indicators.py        # TOPSIS social vulnerability (SVPF)
   exposure.py          # population distribution to buildings
-  hazard.py            # HMA (STRtree + tiling), HWB
+  hazard.py            # HMA (STRtree + street tiling), HWB
   risk.py              # PFRMA/PFRWB calculation, Delaunay smoothing
   thiessen.py          # Voronoi tessellation clipped to study area
+  rocrate_io.py        # RO-Crate FDO I/O via fdo-resolver
+  healpix_agg.py       # HEALPix aggregation on WGS84 ellipsoid (via healpix-geo)
   viz.py               # head/tail breaks classification, publication maps
+
+ro-crate-metadata.json # Workflow RO-Crate with FormalParameter definitions
+viewer/index.html      # MapLibre GL JS web viewer for FlatGeobuf outputs
 ```
 
 ## LifeWatch Integration
@@ -403,4 +494,6 @@ This branch supports execution on the [my.lifewatch.eu](https://my.lifewatch.eu)
 
 - Paper: [Urban Pluvial Flood Risk Mapping for Hamburg](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5231006)
 - FAIR2Adapt project: [fair2adapt.eu](https://fair2adapt.eu/)
+- [fdo-resolver](https://github.com/FAIR2Adapt/fdo-resolver) — RO-Crate input resolution with I-ADOPT variable matching
+- [I-ADOPT](https://i-adopt.github.io/) — Framework for observable property descriptions
 - Output data corresponds to Figures 4, 5, and 6 in the paper

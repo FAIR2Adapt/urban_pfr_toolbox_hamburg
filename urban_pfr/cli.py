@@ -160,6 +160,37 @@ def _run_fdo(args):
 
     paths["output_dir"] = str(output_dir)
 
+    # 2b. Apply column mappings from variableMeasured (I-ADOPT)
+    # These override any existing schema values from the config YAML
+    schema = config.setdefault("schema", {})
+    sensitivity_cols = []
+    coping_cols = []
+
+    for param_name, binding in result.bindings.items():
+        col_map = binding.column_mapping
+        if col_map:
+            log(f"Column mapping for {param_name}: {col_map}")
+            for var_name, col_name in col_map.items():
+                var = next(
+                    (v for v in binding.parameter.variables_measured if v.name == var_name),
+                    None,
+                )
+                if var and var.role:
+                    if var.role.endswith("_col"):
+                        schema[var.role] = col_name
+                    elif "sensitivity" in var.role:
+                        sensitivity_cols.append(col_name)
+                    elif "coping" in var.role:
+                        coping_cols.append(col_name)
+                else:
+                    schema[var_name] = col_name
+
+    # Override config fields with resolved values (not append)
+    if sensitivity_cols:
+        schema["sensitivity_fields"] = sensitivity_cols
+    if coping_cols:
+        schema["coping_fields"] = coping_cols
+
     # 3. Run pipeline
     _run_pipeline(config, str(output_dir), skip_validation=args.skip_validation)
 

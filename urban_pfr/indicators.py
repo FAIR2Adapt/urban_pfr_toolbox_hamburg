@@ -138,6 +138,12 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
     w_coping = tw.get('coping_capacity', None)
     w_svi = tw.get('svi', None)
 
+    # Entropy flags — ArcGIS uses entropy=true for all three steps
+    entropy_cfg = config.get('topsis_entropy', {}) or {}
+    entropy_sensitivity = entropy_cfg.get('sensitivity', True)
+    entropy_coping = entropy_cfg.get('coping_capacity', True)
+    entropy_svi = entropy_cfg.get('svi', True)
+
     svpf_threshold = config.get('svpf_threshold', 0.25)
     svpf_transform = config.get('svpf_transform', 2.0)
 
@@ -152,7 +158,7 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
     # Step 1: Sensitivity
     if len(available_sen) >= 2:
         scores, _ = topsis(buildings_result[available_sen].copy(),
-                           weights=w_sensitivity, use_entropy=True)
+                           weights=w_sensitivity, use_entropy=entropy_sensitivity)
         buildings_result['Sensitivity'] = scores
     else:
         buildings_result['Sensitivity'] = 1.0
@@ -160,15 +166,15 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
     # Step 2: Coping Capacity
     if len(available_cop) >= 2:
         scores, _ = topsis(buildings_result[available_cop].copy(),
-                           weights=w_coping, use_entropy=True)
+                           weights=w_coping, use_entropy=entropy_coping)
         buildings_result['CopingCapacity'] = scores
     else:
         buildings_result['CopingCapacity'] = 0.5
 
-    # Step 3: SVI
+    # Step 3: SVI — ArcGIS uses [CopingCapacity, Sensitivity] order
     svi_scores, _ = topsis(
-        buildings_result[['Sensitivity', 'CopingCapacity']].copy(),
-        weights=w_svi, use_entropy=False
+        buildings_result[['CopingCapacity', 'Sensitivity']].copy(),
+        weights=w_svi, use_entropy=entropy_svi
     )
     buildings_result['SVI'] = svi_scores
 
@@ -183,9 +189,12 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
     if statistical_units_gdf is not None:
         stats_result = statistical_units_gdf.copy()
 
-        # Use spatial join instead of per-unit intersects loop
-        bld_for_join = buildings_result[['geometry', 'SVPF']].copy()
-        bld_for_join = bld_for_join.dropna(subset=['SVPF'])
+        # Aggregate all vulnerability indicators to statistical unit level
+        agg_cols = ['Sensitivity', 'CopingCapacity', 'SVI', 'SVPF']
+        available_agg = [c for c in agg_cols if c in buildings_result.columns]
+
+        bld_for_join = buildings_result[['geometry'] + available_agg].copy()
+        bld_for_join = bld_for_join.dropna(subset=available_agg, how='all')
 
         if len(bld_for_join) > 0 and len(stats_result) > 0:
             try:
@@ -195,22 +204,23 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
                     how='inner',
                     predicate='intersects',
                 )
-                agg = joined.groupby('index_right')['SVPF'].mean()
-                stats_result['svpf'] = stats_result.index.map(agg).fillna(0)
+                for col in available_agg:
+                    agg = joined.groupby('index_right')[col].mean()
+                    stats_result[col] = stats_result.index.map(agg).fillna(0)
             except Exception as e:
                 logger.warning(f"sjoin aggregation failed, using fallback: {e}")
-                # Fallback: original per-unit loop
-                svpf_by_unit = {}
                 for idx, unit in stats_result.iterrows():
                     if unit.geometry is None or pd.isna(unit.geometry):
-                        svpf_by_unit[idx] = 0
+                        for col in available_agg:
+                            stats_result.at[idx, col] = 0
                         continue
                     in_unit = buildings_result[
                         buildings_result.geometry.intersects(unit.geometry)
                     ]
-                    svpf_by_unit[idx] = in_unit['SVPF'].mean() if len(in_unit) > 0 else 0
-                stats_result['svpf'] = pd.Series(svpf_by_unit)
+                    for col in available_agg:
+                        stats_result.at[idx, col] = in_unit[col].mean() if len(in_unit) > 0 else 0
         else:
-            stats_result['svpf'] = 0
+            for col in available_agg:
+                stats_result[col] = 0
 
     return buildings_result, stats_result

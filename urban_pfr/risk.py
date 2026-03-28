@@ -135,12 +135,15 @@ def calculate_risk(buildings_gdf,
 
 
 def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
-                       distance_threshold=100, max_neighbors=10,
-                       blend_weight=0.8):
+                       distance_threshold=None, max_neighbors=None):
     """
     Smooth risk values using Delaunay triangulation and inverse-distance weighting.
 
-    This implements the Thiessen polygon smoothing from the paper.
+    Matches the ArcGIS smoothing formula:
+        newval[i] = (val[i] + sum(val[j]/dist[j]) / sum(1/dist[j])) / (n_neighbors + 1)
+
+    This averages the original value with the inverse-distance-weighted neighbor
+    average, then divides by (n_neighbors + 1).
 
     Parameters
     ----------
@@ -150,13 +153,10 @@ def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
         Column to smooth (e.g. 'PFRMA' or 'PFRWB').
     n_iterations : int
         Number of smoothing passes.
-    distance_threshold : float
-        Maximum distance (meters) to consider neighbors.
-    max_neighbors : int
-        Maximum number of neighbors per building.
-    blend_weight : float
-        Weight for smoothed value (1 - blend_weight for original).
-        Default 0.8 = 80% smoothed + 20% original.
+    distance_threshold : float, optional
+        Maximum distance (meters) to consider neighbors. None = no limit (ArcGIS default).
+    max_neighbors : int, optional
+        Maximum number of neighbors per building. None = no limit (ArcGIS default).
 
     Returns
     -------
@@ -165,19 +165,22 @@ def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
     """
     values = buildings_gdf[risk_col].fillna(0).values.copy().astype(float)
 
+    # Track original NULLs to restore them
+    null_mask = buildings_gdf[risk_col].isna().values
+
     # Get centroids
     centroids = buildings_gdf.geometry.centroid
     coords = np.array([[p.x, p.y] for p in centroids])
 
     if len(coords) < 4:
-        print(f"  ⚠️  Too few buildings ({len(coords)}) for Delaunay — skipping smoothing")
+        print(f"  Too few buildings ({len(coords)}) for Delaunay — skipping smoothing")
         return values
 
     # Build Delaunay triangulation
     try:
         tri = Delaunay(coords)
     except Exception as e:
-        print(f"  ⚠️  Delaunay failed: {e} — skipping smoothing")
+        print(f"  Delaunay failed: {e} — skipping smoothing")
         return values
 
     # Build adjacency from triangulation using sparse matrix (vectorized)
@@ -185,43 +188,72 @@ def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
     rows, cols = [], []
     for simplex in tri.simplices:
         for i in range(3):
-            for j in range(3):
-                if i != j:
-                    rows.append(simplex[i])
-                    cols.append(simplex[j])
+            for j in range(i + 1, 3):
+                p1, p2 = simplex[i], simplex[j]
+                rows.extend([p1, p2])
+                cols.extend([p2, p1])
 
     rows = np.array(rows)
     cols = np.array(cols)
 
-    # Compute distances and filter by threshold
+    # Compute distances
     dists = np.sqrt(
         (coords[rows, 0] - coords[cols, 0]) ** 2 +
         (coords[rows, 1] - coords[cols, 1]) ** 2
     )
-    mask = dists < distance_threshold
-    rows, cols, dists = rows[mask], cols[mask], dists[mask]
 
-    # Weights = 1 / (distance + epsilon)
-    weights = 1.0 / (dists + 1e-10)
+    # Optional distance threshold
+    if distance_threshold is not None:
+        mask = dists <= distance_threshold
+        rows, cols, dists = rows[mask], cols[mask], dists[mask]
 
-    # Build sparse weight matrix and row-normalize
-    W = sparse.coo_matrix((weights, (rows, cols)), shape=(n, n)).tocsr()
+    # Weights = 1 / distance (matching ArcGIS: values[j] / distance[j])
+    inv_dists = 1.0 / (dists + 1e-10)
+
+    # Build sparse weight matrix (1/distance)
+    W = sparse.coo_matrix((inv_dists, (rows, cols)), shape=(n, n)).tocsr()
+
+    # Limit to max_neighbors per building if specified
+    if max_neighbors is not None:
+        for i in range(n):
+            row_start = W.indptr[i]
+            row_end = W.indptr[i + 1]
+            nnz = row_end - row_start
+            if nnz > max_neighbors:
+                col_indices = W.indices[row_start:row_end]
+                row_dists = np.sqrt(
+                    (coords[col_indices, 0] - coords[i, 0]) ** 2 +
+                    (coords[col_indices, 1] - coords[i, 1]) ** 2
+                )
+                keep = np.argsort(row_dists)[:max_neighbors]
+                zero_mask = np.ones(nnz, dtype=bool)
+                zero_mask[keep] = False
+                W.data[row_start:row_end][zero_mask] = 0.0
+        W.eliminate_zeros()
+
+    # Count neighbors per building
+    n_neighbors = np.diff(W.indptr)  # number of non-zero entries per row
+
+    # Row-normalize W to get inverse-distance-weighted average
     row_sums = np.array(W.sum(axis=1)).flatten()
-    has_neighbors = row_sums > 0  # track before modifying for normalization
+    has_neighbors = row_sums > 0
     row_sums_safe = row_sums.copy()
     row_sums_safe[row_sums_safe == 0] = 1
     D_inv = sparse.diags(1.0 / row_sums_safe)
     W_norm = D_inv @ W
 
-    # Iterative smoothing: blend_weight * neighbor_avg + (1 - blend_weight) * original
-    # Only blend buildings that have neighbors; isolated buildings keep their value.
+    # Iterative smoothing matching ArcGIS formula:
+    # newval[i] = (val[i] + weighted_avg_neighbors) / (n_neighbors + 1)
     for iteration in range(n_iterations):
-        smoothed = W_norm @ values
+        weighted_avg = W_norm @ values  # inverse-distance-weighted neighbor average
         new_values = values.copy()
         new_values[has_neighbors] = (
-            blend_weight * smoothed[has_neighbors] +
-            (1 - blend_weight) * values[has_neighbors]
+            (values[has_neighbors] + weighted_avg[has_neighbors])
+            / (n_neighbors[has_neighbors] + 1)
         )
         values = new_values
+
+    # Restore NULLs
+    values[null_mask] = np.nan
 
     return values

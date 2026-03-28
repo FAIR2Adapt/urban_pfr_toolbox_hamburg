@@ -40,12 +40,12 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
     if missing:
         raise ValueError(f"Missing columns in buildings: {missing}")
 
-    # Residential floor area: residential types use all floors,
-    # non-residential types lose `non_residential_floor_deduction` floors
-    is_residential = buildings_result[building_type_col].isin(residential_types)
-    deduction = np.where(is_residential, 0, non_residential_floor_deduction)
+    # Residential floor area per building: deduct (building_type - 1) floors
+    # for non-residential use (type 1 = fully residential, type 2 = 1 floor
+    # non-residential, type 3 = 2 floors non-residential, etc.)
     buildings_result['Area_house'] = (
-        (buildings_result[floors_col] - deduction) * buildings_result.geometry.area
+        (buildings_result[floors_col] - (buildings_result[building_type_col] - 1))
+        * buildings_result.geometry.area
     )
     buildings_result.loc[buildings_result['Area_house'] < 0, 'Area_house'] = 0
 

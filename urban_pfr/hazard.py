@@ -151,7 +151,9 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
 
     max_flood_pct = np.zeros(n_total)
 
-    for buffer_dist in buffers:
+    sorted_buffers = sorted(buffers)
+
+    for buffer_dist in sorted_buffers:
         print(f"  HMA buffer {buffer_dist}m ({n_total} buildings) ...")
 
         # Vectorized buffer creation
@@ -167,18 +169,23 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
             if ring.is_empty or ring.area <= 0:
                 continue
 
-            # Intersect ring with street tiles (all buffer distances)
-            street_in_ring, total_street_area = _compute_street_area_in_ring(
-                ring, street_tree, street_geoms, street_prep
-            )
+            if buffer_dist <= 5:
+                # 5m buffer: direct flood fraction in the ring (no streets)
+                flood_pct = _compute_flood_fraction(
+                    ring, flood_tree, flood_geoms, flood_prep
+                ) * 100
+            else:
+                # 15m/30m buffers: flood fraction on streets within the ring
+                street_in_ring, total_street_area = _compute_street_area_in_ring(
+                    ring, street_tree, street_geoms, street_prep
+                )
 
-            if street_in_ring is None or total_street_area < min_area_threshold:
-                continue
+                if street_in_ring is None or total_street_area < min_area_threshold:
+                    continue
 
-            # Check flood coverage of street-in-ring
-            flood_pct = _compute_flood_fraction(
-                street_in_ring, flood_tree, flood_geoms, flood_prep
-            ) * 100
+                flood_pct = _compute_flood_fraction(
+                    street_in_ring, flood_tree, flood_geoms, flood_prep
+                ) * 100
 
             if flood_pct > max_flood_pct[i]:
                 max_flood_pct[i] = flood_pct
@@ -247,7 +254,8 @@ def calculate_hazard_wellbeing(buildings_gdf, flood_layers_dict,
             if flood_frac > 0:
                 hwb_values[i] += lognorm.cdf(flood_frac * 4, shape_param)
 
-    buildings_result['HWB'] = hwb_values
+    # Clip to [0, 1] to match ArcGIS behavior
+    buildings_result['HWB'] = np.clip(hwb_values, 0, 1)
 
     n = (buildings_result['HWB'] > 0).sum()
     print(f"HWB: {n}/{len(buildings_result)} buildings affected, "

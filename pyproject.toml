@@ -41,12 +41,16 @@ dependencies = [
     "pyyaml>=5.4.0",
     "fiona>=1.8.0",
     "shapely>=1.8.0",
-    "fdo-resolver>=0.1.0",
 ]
 
 [project.optional-dependencies]
+fdo = [
+    "fdo-resolver>=0.2.0",
+    "healpix-geo>=0.0.11",
+]
 dev = [
     "pytest>=6.0",
+    "healpix-geo>=0.0.11",
     "pytest-cov>=2.12",
     "black>=21.0",
     "flake8>=3.9",

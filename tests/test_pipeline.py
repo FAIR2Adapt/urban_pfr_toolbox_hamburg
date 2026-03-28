@@ -9,6 +9,12 @@ import geopandas as gpd
 import pytest
 from shapely.geometry import box, Polygon
 
+try:
+    import healpix_geo
+    HAS_HEALPIX = True
+except ImportError:
+    HAS_HEALPIX = False
+
 
 # ── Fixtures ──
 
@@ -194,6 +200,7 @@ class TestRisk:
 
 # ── HEALPix tests ──
 
+@pytest.mark.skipif(not HAS_HEALPIX, reason="healpix-geo not installed")
 class TestHEALPix:
     def test_aggregate_to_healpix(self, synthetic_buildings):
         from urban_pfr.healpix_agg import aggregate_to_healpix

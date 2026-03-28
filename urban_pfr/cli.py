@@ -548,13 +548,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.mode is None:
-        if CONFIG_PATH.exists():
+        # Auto-detect: check for RO-Crates first, then config.yaml
+        has_rocrates = any(INPUT_DIR.rglob("ro-crate-metadata.json")) if INPUT_DIR.exists() else False
+
+        if has_rocrates:
+            log("Detected RO-Crate inputs — running in FDO mode")
+            args.mode = "fdo"
+            args.workflow_crate = "/usr/src/app"
+            args.input_dir = str(INPUT_DIR)
+            args.output_dir = str(OUTPUT_DIR)
+            args.skip_validation = False
+            _run_fdo(args)
+        elif CONFIG_PATH.exists():
             args.mode = "docker"
             args.skip_validation = False
             _run_docker(args)
         else:
             parser.print_help()
-            print(f"\n{YELLOW}Hint:{RESET} use 'local <config.yaml>' or 'docker'")
+            print(f"\n{YELLOW}Hint:{RESET} use 'local <config.yaml>', 'docker', or 'fdo'")
             sys.exit(1)
     elif args.mode == "docker":
         _run_docker(args)

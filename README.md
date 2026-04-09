@@ -61,7 +61,7 @@ Non-residential buildings (type 2) receive zero exposure.
 HMA = lognorm.cdf(max_flood_fraction * 4, shape=0.25)
 ```
 
-Uses STRtree spatial indexing and street geometry tiling for performance (~40 min for 227k buildings).
+Uses STRtree spatial indexing and street geometry tiling for performance (~55 min for 227k buildings).
 
 **HWB** (Hazard Well-Being): For each building, creates a 2m ring buffer and measures flood coverage at each depth level (30–100cm). Each depth's flood fraction is transformed via lognormal CDF and summed:
 
@@ -78,7 +78,7 @@ PFRMA = HMA^w_h * R^w_e * SVPF^w_v
 PFRWB = HWB^w_h * R_G^w_e * SVPF^w_v
 ```
 
-**Delaunay smoothing**: Risk values are spatially smoothed using Delaunay triangulation to identify building neighbors. Each iteration blends 80% weighted neighbor average + 20% original value (3 iterations by default, neighbors within 100m). Uses sparse matrix multiplication for performance. Buildings without neighbors keep their original values.
+**Delaunay smoothing**: Risk values are spatially smoothed using Delaunay triangulation to identify building neighbors. Each iteration computes `(original + inv_dist_weighted_avg) / (n_neighbors + 1)`, matching the ArcGIS formula (3 iterations by default, no distance threshold or max neighbors limit). Uses sparse matrix multiplication for performance. Buildings without neighbors keep their original values.
 
 #### 5. Thiessen polygons (thiessen.py)
 
@@ -394,8 +394,6 @@ risk_settings:
   weight_exposure: 1.0
   weight_vulnerability: 1.0
   smoothing_iterations: 3
-  max_neighbors: 10
-  distance_threshold: 100         # meters
 
 topsis_weights:
   sensitivity: [0.7, 0.3]
@@ -445,7 +443,9 @@ output_settings:
 ```
 outputs/private/
   buildings_with_risk.gpkg                       # Full building-level data + demographics
+  buildings_with_risk.fgb                        # Same, EPSG:4326 FlatGeobuf (web-ready)
   statistical_units_with_vulnerability.gpkg      # Statistical units with all indicators
+  statistical_units_with_vulnerability.fgb       # Same, EPSG:4326 FlatGeobuf (web-ready)
 ```
 
 Contains building-level risk values plus demographics (`Residents`, `ES`, `C`, `WR`, `EDQ`, `R`, `R_G`, etc.). These files should **not be published** as they contain private demographic data at individual building level.
@@ -484,7 +484,7 @@ viewer/index.html      # MapLibre GL JS web viewer for FlatGeobuf outputs
 
 This branch supports execution on the [my.lifewatch.eu](https://my.lifewatch.eu) workflow platform (Argo-based):
 
-- **Dockerfile**: `python:3.11.5-slim-bullseye` image, runs `run_analysis.py` as entrypoint
+- **Dockerfile**: `ghcr.io/osgeo/gdal:ubuntu-small-3.9.3` image (includes GDAL), runs `run_analysis.py` as entrypoint
 - **I/O contract**: Inputs at `/mnt/inputs/`, outputs at `/mnt/outputs/` (YAML paths are overridden)
 - **`annotation.json`**: LifeWatch service metadata (inputs/outputs/resources/tags)
 - **`bin/build-image`**: Builds Docker image using name/version from `annotation.json`

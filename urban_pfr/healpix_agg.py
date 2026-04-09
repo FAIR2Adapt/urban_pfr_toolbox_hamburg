@@ -66,7 +66,7 @@ def aggregate_to_healpix(buildings_gdf, depth=15, risk_columns=None,
     lat = centroids.y.values
 
     # Assign each building to a HEALPix cell
-    pixels = hpx.lonlat_to_healpix(lon, lat, depth)
+    pixels = hpx.lonlat_to_healpix(lon, lat, depth, ellipsoid=ELLIPSOID)
     bldg['_healpix'] = pixels
 
     # Aggregate risk columns per cell

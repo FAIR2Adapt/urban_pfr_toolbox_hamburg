@@ -153,18 +153,23 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
 
     sorted_buffers = sorted(buffers)
 
-    for buffer_dist in sorted_buffers:
+    outers = {d: buildings_result.geometry.buffer(d) for d in sorted_buffers}
+
+    for idx_b, buffer_dist in enumerate(sorted_buffers):
         print(f"  HMA buffer {buffer_dist}m ({n_total} buildings) ...")
 
-        # Vectorized buffer creation
-        outer = buildings_result.geometry.buffer(buffer_dist)
+        outer = outers[buffer_dist]
+        # 15-to-30 m disjoint ring required by the paper / ArcGIS.
+        use_prev_outer_as_inner = idx_b >= 2
+        prev_outer = outers[sorted_buffers[idx_b - 1]] if use_prev_outer_as_inner else None
 
         for i in range(n_total):
             if i > 0 and i % BATCH_LOG_SIZE == 0:
                 print(f"    {i}/{n_total} ...")
 
             building_geom = buildings_result.geometry.iloc[i]
-            ring = outer.iloc[i].difference(building_geom)
+            inner = prev_outer.iloc[i] if use_prev_outer_as_inner else building_geom
+            ring = outer.iloc[i].difference(inner)
 
             if ring.is_empty or ring.area <= 0:
                 continue
@@ -175,7 +180,7 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
                     ring, flood_tree, flood_geoms, flood_prep
                 ) * 100
             else:
-                # 15m/30m buffers: flood fraction on streets within the ring
+                # 15m / 15-to-30m buffers: flood fraction on streets within the ring
                 street_in_ring, total_street_area = _compute_street_area_in_ring(
                     ring, street_tree, street_geoms, street_prep
                 )

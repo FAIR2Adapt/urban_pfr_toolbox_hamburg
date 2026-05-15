@@ -212,12 +212,20 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
 def calculate_hazard_wellbeing(buildings_gdf, flood_layers_dict,
                                buffer_distance=2,
                                shape_param=0.25,
-                               depth_thresholds=[20, 30, 40, 50, 60, 70, 80, 90, 100]):
+                               depth_thresholds=[20, 30, 40, 50, 60, 70, 80, 90, 100],
+                               hwb_clip_max=None):
     """
     HWB per building: 2m ring buffer, for each flood depth compute
     flood fraction in buffer, apply lognorm.cdf, sum across depths.
 
     HWB = sum( lognorm.cdf(flood_pct_i * 4 / 100, shape) )
+
+    Parameters
+    ----------
+    hwb_clip_max : float or None
+        If None (default), HWB is left unclipped (real numbers).
+        If a number (e.g. 1.0), HWB values above this are clipped to it,
+        it reproduces the paper's *public* file where HWB ≤ 1, required for replication and loom
     """
     buildings_result = buildings_gdf.copy()
     n_total = len(buildings_result)
@@ -259,9 +267,13 @@ def calculate_hazard_wellbeing(buildings_gdf, flood_layers_dict,
             if flood_frac > 0:
                 hwb_values[i] += lognorm.cdf(flood_frac * 4, shape_param)
 
-    # Clip to [0, 1] to match ArcGIS behavior
-    buildings_result['HWB'] = np.clip(hwb_values, 0, 1)
-
+    # Paper Eq.2 / ArcGIS Step2 do NOT clip 
+    # Optional clip is offered for the *public* view in paper figures
+    if hwb_clip_max is not None:
+        print(f"  Clipping HWB to [0, {hwb_clip_max}] (paper-public mode)")
+        hwb_values = np.clip(hwb_values, 0, float(hwb_clip_max))
+    buildings_result['HWB'] = hwb_values
+    
     n = (buildings_result['HWB'] > 0).sum()
     print(f"HWB: {n}/{len(buildings_result)} buildings affected, "
           f"max={buildings_result['HWB'].max():.4f}")

@@ -223,7 +223,9 @@ class PFRAnalyzer:
         self.buildings = calculate_hazard_wellbeing(
             self.buildings, self.flood_layers,
             buffer_distance=hazard_cfg.get('hwb_buffer', 2),
-            shape_param=hazard_cfg.get('shape_param', 0.25)
+            shape_param=hazard_cfg.get('shape_param', 0.25),
+            #Added
+            hwb_clip_max=hazard_cfg.get('hwb_clip_max', None)
         )
         return self
 
@@ -343,8 +345,8 @@ class PFRAnalyzer:
         # Private FlatGeobuf (EPSG:4326, web-ready)
         b_fgb = f"{private_dir}/buildings_with_risk.fgb"
         s_fgb = f"{private_dir}/statistical_units_with_vulnerability.fgb"
-        self.buildings.to_crs('EPSG:4326').to_file(b_fgb, driver='FlatGeobuf')
-        self.statistical_units.to_crs('EPSG:4326').to_file(s_fgb, driver='FlatGeobuf')
+        self.buildings.dropna(subset=['geometry']).to_crs('EPSG:4326').to_file(b_fgb, driver='FlatGeobuf')
+        self.statistical_units.dropna(subset=['geometry']).to_crs('EPSG:4326').to_file(s_fgb, driver='FlatGeobuf')
         paths['buildings_private_fgb'] = b_fgb
         paths['statistical_units_private_fgb'] = s_fgb
         print(f"  Private results (full data): {private_dir}/")

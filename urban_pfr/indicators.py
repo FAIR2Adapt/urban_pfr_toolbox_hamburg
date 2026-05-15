@@ -155,34 +155,103 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
         coping_fields = ['Y', 'L', 'MM']
     available_cop = [c for c in coping_fields if c in buildings_result.columns]
 
-    # Step 1: Sensitivity
-    if len(available_sen) >= 2:
-        scores, _ = topsis(buildings_result[available_sen].copy(),
-                           weights=w_sensitivity, use_entropy=entropy_sensitivity)
-        buildings_result['Sensitivity'] = scores
+    # Paper-replication path (Section 4.5 / 4.2): TOPSIS at stat-unit level on
+    # demographic percentages (count / Residents), then propagate to buildings.
+    # Default 'building' preserves the existing per-building behaviour.
+    topsis_granularity = config.get('topsis_granularity', 'building')
+    schema = config.get('schema', {}) or {}
+    stat_unit_col = schema.get('stat_unit_col', 'StatisticalUnit')
+    residents_col = schema.get('residents_col', 'Residents')
+
+    if topsis_granularity == 'stat_unit':
+        if stat_unit_col not in buildings_result.columns:
+            raise ValueError(
+                f"topsis_granularity='stat_unit' requires column '{stat_unit_col}' in buildings"
+            )
+        if residents_col not in buildings_result.columns:
+            raise ValueError(
+                f"topsis_granularity='stat_unit' requires column '{residents_col}' in buildings"
+            )
+
+        agg_cols = list(dict.fromkeys(available_sen + available_cop + [residents_col]))
+        su_table = buildings_result.groupby(stat_unit_col)[agg_cols].first().reset_index()
+        residents = su_table[residents_col].replace(0, np.nan)
+
+        pct_sen, pct_cop = [], []
+        for c in available_sen:
+            pc = f"{c}_pct"
+            su_table[pc] = su_table[c] / residents
+            pct_sen.append(pc)
+        for c in available_cop:
+            pc = f"{c}_pct"
+            su_table[pc] = su_table[c] / residents
+            pct_cop.append(pc)
+
+        # Step 1 at stat-unit level
+        if len(pct_sen) >= 2:
+            sen_su, _ = topsis(su_table[pct_sen].fillna(0).copy(),
+                               weights=w_sensitivity, use_entropy=entropy_sensitivity)
+        else:
+            sen_su = pd.Series(1.0, index=su_table.index)
+        su_table['Sensitivity'] = sen_su
+
+        # Step 2 at stat-unit level
+        if len(pct_cop) >= 2:
+            cop_su, _ = topsis(su_table[pct_cop].fillna(0).copy(),
+                               weights=w_coping, use_entropy=entropy_coping)
+        else:
+            cop_su = pd.Series(0.5, index=su_table.index)
+        su_table['CopingCapacity'] = cop_su
+
+        # Step 3: SVI at stat-unit level
+        svi_su, _ = topsis(
+            su_table[['CopingCapacity', 'Sensitivity']].copy(),
+            weights=w_svi, use_entropy=entropy_svi,
+        )
+        su_table['SVI'] = svi_su
+        su_table['SVPF'] = flood_susceptibility_transform(
+            su_table['SVI'].values,
+            threshold=svpf_threshold, transform=svpf_transform,
+        )
+
+        # Propagate stat-unit values to buildings
+        for col in ('Sensitivity', 'CopingCapacity', 'SVI', 'SVPF'):
+            mapping = dict(zip(su_table[stat_unit_col], su_table[col]))
+            buildings_result[col] = buildings_result[stat_unit_col].map(mapping)
+
+        print(
+            f"Sensitivity (stat-unit, {len(su_table)} units): "
+            f"median={su_table['Sensitivity'].median():.4f}"
+        )
     else:
-        buildings_result['Sensitivity'] = 1.0
+        # Step 1: Sensitivity (per-building)
+        if len(available_sen) >= 2:
+            scores, _ = topsis(buildings_result[available_sen].copy(),
+                               weights=w_sensitivity, use_entropy=entropy_sensitivity)
+            buildings_result['Sensitivity'] = scores
+        else:
+            buildings_result['Sensitivity'] = 1.0
 
-    # Step 2: Coping Capacity
-    if len(available_cop) >= 2:
-        scores, _ = topsis(buildings_result[available_cop].copy(),
-                           weights=w_coping, use_entropy=entropy_coping)
-        buildings_result['CopingCapacity'] = scores
-    else:
-        buildings_result['CopingCapacity'] = 0.5
+        # Step 2: Coping Capacity (per-building)
+        if len(available_cop) >= 2:
+            scores, _ = topsis(buildings_result[available_cop].copy(),
+                               weights=w_coping, use_entropy=entropy_coping)
+            buildings_result['CopingCapacity'] = scores
+        else:
+            buildings_result['CopingCapacity'] = 0.5
 
-    # Step 3: SVI — ArcGIS uses [CopingCapacity, Sensitivity] order
-    svi_scores, _ = topsis(
-        buildings_result[['CopingCapacity', 'Sensitivity']].copy(),
-        weights=w_svi, use_entropy=entropy_svi
-    )
-    buildings_result['SVI'] = svi_scores
+        # Step 3: SVI — ArcGIS uses [CopingCapacity, Sensitivity] order
+        svi_scores, _ = topsis(
+            buildings_result[['CopingCapacity', 'Sensitivity']].copy(),
+            weights=w_svi, use_entropy=entropy_svi
+        )
+        buildings_result['SVI'] = svi_scores
 
-    # Step 4: SVPF
-    buildings_result['SVPF'] = flood_susceptibility_transform(
-        buildings_result['SVI'].values,
-        threshold=svpf_threshold, transform=svpf_transform
-    )
+        # Step 4: SVPF
+        buildings_result['SVPF'] = flood_susceptibility_transform(
+            buildings_result['SVI'].values,
+            threshold=svpf_threshold, transform=svpf_transform
+        )
 
     # ── Aggregate to statistical units via sjoin + groupby ──
     stats_result = None

@@ -9,6 +9,11 @@ project:
     streets: "./input_data_hamburg_test_prepared/Streets.gpkg"
     flood_dir: "./input_data_hamburg_test_prepared/Floodlevels"
     output_dir: "./outputs/hamburg_test"
+
+# Paper-replication (Section 4.5): TOPSIS on stat-unit demographic percentages
+#set to Default 'building' preserves the per-building behaviour
+topsis_granularity: stat_unit
+
 schema:
   buildings_layer: null
   stats_layer: null
@@ -18,8 +23,8 @@ schema:
   living_area_col: "LivingArea"
   floors_col: "Floors"
   building_type_col: "Building_type"
-  sensitivity_fields: ["WR", "C"]
-  coping_fields: ["ES", "EDQ"]
+  sensitivity_fields: ["ES", "C"]      # elderly singles (w=0.7) + children (w=0.3)
+  coping_fields: ["WR", "EDQ"]         # welfare (0.5) + education (0.5)
 hazard_settings:
   hma_buffers: [5, 15, 30]
   hwb_buffer: 2
@@ -27,6 +32,7 @@ hazard_settings:
   flood_threshold: 0.3
   shape_param: 0.25
   min_area_threshold: 0.0
+  hwb_clip_max: null      # null = paper Eq.2 (unclipped, max ~9), set to 1.0 to match paper public figs
 risk_settings:
   weight_hazard: 1.0
   weight_exposure: 1.0

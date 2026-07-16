@@ -29,6 +29,8 @@ class PFRAnalyzer:
         self.statistical_units = None
         self.streets = None
         self.flood_layers = None
+        # Need to keep canonical footprints untouched in self.buildings for private view
+        self.buildings_thiessen = None
 
         city = config.get('project', {}).get('city_name', 'Unknown')
         crs = config.get('project', {}).get('crs', 'Not specified')
@@ -260,7 +262,7 @@ class PFRAnalyzer:
         return self
 
     def apply_thiessen(self):
-        """Replace building footprints with Thiessen polygons for visualization."""
+        """Build Thiessen derivative into self.buildings_thiessen; canonical footprints untouched."""
         paths = self.config.get('project', {}).get('paths', {})
         boundary_file = paths.get('boundary_file')
 
@@ -270,7 +272,7 @@ class PFRAnalyzer:
             boundary = gpd.read_file(boundary_file)
             boundary = self._ensure_crs(boundary, "boundary")
 
-        self.buildings = create_thiessen_polygons(
+        self.buildings_thiessen = create_thiessen_polygons(
             self.buildings, boundary=boundary
         )
         return self
@@ -307,8 +309,11 @@ class PFRAnalyzer:
 
         n_classes = self.config.get('risk_settings', {}).get('n_classes', 5)
 
+        # Legacy paper map uses the Thiessen derivative when available
+        bldgs = self.buildings_thiessen if self.buildings_thiessen is not None else self.buildings
+
         return create_risk_visualization(
-            self.buildings, self.statistical_units,
+            bldgs, self.statistical_units,
             pfrma_column='PFRMA', pfrwb_column='PFRWB',
             n_classes=n_classes, title_prefix=title_prefix, save_path=save_path,
             config=self.config

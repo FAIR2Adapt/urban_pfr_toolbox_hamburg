@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "test", email = "zakieh@gmail.com"}
+    { name = "FAIR2Adapt Team" }
 ]
 keywords = [
     "flood risk",
@@ -68,7 +68,7 @@ Homepage = "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg"
 Repository = "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg"
 
 [tool.setuptools]
-packages = ["urban_pfr"]
+packages = ["urban_pfr", "urban_pfr.visualization"]
 
 [tool.setuptools.package-data]
 urban_pfr = ["data/*.yaml"]

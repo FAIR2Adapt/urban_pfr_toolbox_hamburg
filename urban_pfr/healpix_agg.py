@@ -55,10 +55,11 @@ def aggregate_to_healpix(buildings_gdf, depth=15, risk_columns=None,
     if not risk_columns:
         raise ValueError("No risk columns found to aggregate")
 
-    # Convert to EPSG:4326
-    bldg = buildings_gdf.copy()
-    if bldg.crs and str(bldg.crs) != 'EPSG:4326':
-        bldg = bldg.to_crs('EPSG:4326')
+    # Convert to EPSG:4326, to_crs already returns a new frame, so only copy when no reprojection happens
+    if buildings_gdf.crs and str(buildings_gdf.crs) != 'EPSG:4326':
+        bldg = buildings_gdf.to_crs('EPSG:4326')
+    else:
+        bldg = buildings_gdf.copy()
 
     # Building centroids in lon/lat
     centroids = bldg.geometry.centroid

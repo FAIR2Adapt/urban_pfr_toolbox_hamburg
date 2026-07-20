@@ -347,10 +347,11 @@ class PFRAnalyzer:
         paths['buildings_private'] = b_path
         paths['statistical_units_private'] = s_path
 
-        # Private FlatGeobuf (EPSG:4326, web-ready)
+        # Private FlatGeobuf (EPSG:4326, web-ready); reuse the reprojected frame for HEALPix below
         b_fgb = f"{private_dir}/buildings_with_risk.fgb"
         s_fgb = f"{private_dir}/statistical_units_with_vulnerability.fgb"
-        self.buildings.dropna(subset=['geometry']).to_crs('EPSG:4326').to_file(b_fgb, driver='FlatGeobuf')
+        bldg_4326 = self.buildings.dropna(subset=['geometry']).to_crs('EPSG:4326')
+        bldg_4326.to_file(b_fgb, driver='FlatGeobuf')
         self.statistical_units.dropna(subset=['geometry']).to_crs('EPSG:4326').to_file(s_fgb, driver='FlatGeobuf')
         paths['buildings_private_fgb'] = b_fgb
         paths['statistical_units_private_fgb'] = s_fgb
@@ -375,7 +376,7 @@ class PFRAnalyzer:
         from .healpix_agg import aggregate_to_healpix
         print(f"  Public risk: HEALPix depth {healpix_depth} (min {min_buildings} buildings/cell)")
         healpix_risk = aggregate_to_healpix(
-            self.buildings, depth=healpix_depth,
+            bldg_4326, depth=healpix_depth,
             risk_columns=available_risk, min_buildings=min_buildings,
         )
         # Already in EPSG:4326
@@ -394,7 +395,7 @@ class PFRAnalyzer:
         if vuln_columns:
             print(f"  Public vulnerability: HEALPix depth {healpix_depth}")
             healpix_vuln = aggregate_to_healpix(
-                self.buildings, depth=healpix_depth,
+                bldg_4326, depth=healpix_depth,
                 risk_columns=vuln_columns, min_buildings=min_buildings,
             )
             vuln_fgb = f"{public_dir}/vulnerability_healpix.fgb"
@@ -405,6 +406,7 @@ class PFRAnalyzer:
             healpix_vuln.to_crs(self.buildings.crs).to_file(vuln_gpkg, driver=driver)
             paths['vulnerability_public'] = vuln_gpkg
 
+        del bldg_4326  # free the reprojected copy as soon as both aggregations are done
         print(f"  Public results (HEALPix + vulnerability): {public_dir}/")
         print(f"Results saved to {output_dir}")
         return paths

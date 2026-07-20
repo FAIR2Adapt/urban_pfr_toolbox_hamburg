@@ -335,7 +335,8 @@ class TestGeometryLifecycle:
         assert len(saved) == len(synthetic_buildings)
         assert saved.geometry.geom_equals(synthetic_buildings.geometry).all()
         assert not saved.geometry.geom_equals(analyzer.buildings_thiessen.geometry).all()
-        assert captured['geometry'].geom_equals(analyzer.buildings.geometry).all()
+        # HEALPix receives the canonical footprints (reprojected once to EPSG:4326 for reuse)
+        assert captured['geometry'].geom_equals(analyzer.buildings.to_crs('EPSG:4326').geometry).all()
 
     def test_visualize_prefers_thiessen(self, analyzer_config, synthetic_buildings,
                                         synthetic_stats, synthetic_streets,

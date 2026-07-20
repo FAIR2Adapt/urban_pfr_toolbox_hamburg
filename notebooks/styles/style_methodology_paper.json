@@ -1,0 +1,12 @@
+{
+  "name": "Vogelbacher et al. (2026) NHESS 26:2765 methodology-paper palettes (approximate hex values, adjust as needed)",
+  "view_colors": {
+    "risk_ma": ["#FFFFFF", "#F2D8E7", "#DE9FC6", "#B05A9C", "#6E205F"],
+    "risk_wb": ["#FFFFFF", "#F2D8E7", "#DE9FC6", "#B05A9C", "#6E205F"],
+    "vulnerability": ["#FFFFFF", "#FDD0A2", "#FD8D3C", "#D94801", "#7F2704"],
+    "hazard_ma": ["#FFFFFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"],
+    "hazard_wb": ["#FFFFFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"],
+    "exposure_ma": ["#FFFFFF", "#CCECE6", "#66C2A4", "#238B45", "#00441B"],
+    "exposure_wb": ["#FFFFFF", "#CCECE6", "#66C2A4", "#238B45", "#00441B"]
+  }
+}

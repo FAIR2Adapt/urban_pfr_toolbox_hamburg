@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "urban-pfr"
-version = "0.1.0"
+version = "0.2.1"
 description = "City-independent pluvial flood risk assessment package"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "FAIR Solution 3 Team", email = "your.email@example.com"}
+    { name = "FAIR2Adapt Team" }
 ]
 keywords = [
     "flood risk",
@@ -44,6 +44,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fdo = [
+    "fdo-resolver>=0.2.0",
+    "healpix-geo>=0.0.11",
+]
 dev = [
     "pytest>=6.0",
     "pytest-cov>=2.12",
@@ -55,14 +59,16 @@ viz = [
     "contextily>=1.1.0",
 ]
 
+[project.scripts]
+urban-pfr = "urban_pfr.cli:main"
+urban-pfr-figures = "urban_pfr.plot_figures:main"
+
 [project.urls]
-Homepage = "https://github.com/yourusername/urban-pfr"
-Documentation = "https://urban-pfr.readthedocs.io"
-Repository = "https://github.com/yourusername/urban-pfr"
-"Bug Tracker" = "https://github.com/yourusername/urban-pfr/issues"
+Homepage = "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg"
+Repository = "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg"
 
 [tool.setuptools]
-packages = ["urban_pfr"]
+packages = ["urban_pfr", "urban_pfr.visualization"]
 
 [tool.setuptools.package-data]
 urban_pfr = ["data/*.yaml"]

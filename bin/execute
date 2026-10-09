@@ -1,0 +1,652 @@
+#!/usr/bin/env bash
+
+# Initialize top level variables
+
+ANNOTATION_FILE="annotation.json"
+EXECUTION_PARAMS_FILE="data/execution-parameters.json"
+
+COL_BG_RED="\e[41m"
+COL_FG_GREEN='\033[0;32m'
+COL_RESET='\e[0m'
+
+# Check dependencies
+
+if ! test -n "$(command -v jq)"; then
+  echo "ERROR: jq not found, please look the dependencies section of the project README.md"
+  exit 1
+fi
+
+# -----------------------------------------------------
+# Helper functions
+# -----------------------------------------------------
+
+in_array () {
+  # There are shorter solutions but this works better when we encounter spaces
+  # in JSON key names (some other solutions, based on grep or regex, can fail).
+  local e match="$1"
+  shift
+  for e; do [[ "$e" == "$match" ]] && return 0; done
+  return 1
+}
+
+lint_failed () {
+  echo -e "${COL_BG_RED}Linting failed${COL_RESET}"
+  exit 1
+}
+
+validation_failed () {
+  echo -e "${COL_BG_RED}Validation failed${COL_RESET}"
+  exit 1
+}
+
+# -----------------------------------------------------
+# Validate annotation JSON
+# -----------------------------------------------------
+
+# Note: all required keys (for multiple sections) equal valid keys
+# because for now we assume all keys must exist (although some of the
+# fields - which are optional - are allowed to be null). If later seems
+# this is not desired we should change REQUIRED_{NAME}_KEYS with the
+# desired fields (instead of copying VALID_{NAME}_KEYS)
+
+declare -a VALID_KEYS=( \
+  "name" \
+  "label" \
+  "description" \
+  "type" \
+  "dockerImage" \
+  "parameters" \
+  "inputs" \
+  "outputs" \
+  "resources" \
+  "tags" \
+  "license" \
+  "version" \
+  "dependencies" \
+  "publicationDate" \
+  "author" \
+  "citation" \
+  "bugs" \
+  "testPath" \
+  "metaDataCatalogueUrl" \
+)
+
+REQUIRED_KEYS=("${VALID_KEYS[@]}")
+
+# Note: the `required` field below is for the `optionList`
+declare -a VALID_PARAMETER_KEYS=( \
+  "name" \
+  "label" \
+  "description" \
+  "defaultValue" \
+  "type" \
+  "min" \
+  "max" \
+  "step" \
+  "validationMessage" \
+  "required" \
+  "optionList" \
+  "readOnly" \
+  "secret" \
+)
+
+REQUIRED_PARAMETER_KEYS=("${VALID_PARAMETER_KEYS[@]:0:5}")
+
+declare -a REQUIRED_PARAMETER_OPTION_LIST_KEYS=( \
+  "value" \
+  "label" \
+)
+
+VALID_INPUT_OUTPUT_KEYS=( \
+  "name" \
+  "type" \
+  "label" \
+  "path" \
+  "description" \
+)
+
+REQUIRED_INPUT_OUTPUT_KEYS=("${VALID_INPUT_OUTPUT_KEYS[@]}")
+
+declare -a VALID_RESOURCE_KEYS=( \
+  "cores" \
+  "memory" \
+  "gpuNeeded" \
+  "gpuMemory" \
+  "estimatedTime" \
+)
+
+REQUIRED_RESOURCE_KEYS=("${VALID_RESOURCE_KEYS[@]}")
+
+declare -a VALID_DEPENDENCY_KEYS=( \
+  "name" \
+  "license" \
+  "version" \
+  "author" \
+  "citation" \
+)
+
+REQUIRED_DEPENDENCY_KEYS=("${VALID_DEPENDENCY_KEYS[@]}")
+
+declare -a VALID_CONTACT_FOR_BUGS_KEYS=( \
+  "email" \
+  "url"
+)
+
+REQUIRED_CONTACT_FOR_BUGS_KEYS=("${VALID_CONTACT_FOR_BUGS_KEYS[@]}")
+
+declare -a VALID_WRAPPER_TYPES=( \
+  "DataAnalysing" \
+  "DataCollection" \
+  "DataProcessing" \
+  "DataSink" \
+  "DataFlow" \
+  "Core"\
+)
+
+declare -a VALID_PARAMETER_TYPES=( \
+  "List" \
+  "Boolean" \
+  "Date" \
+  "Double" \
+  "Float" \
+  "Integer" \
+  "String" \
+  "Timestamp" \
+)
+
+# Start
+
+echo "Running checks.."
+
+# Check if the annotation file exists.
+
+if ! test -f "$ANNOTATION_FILE"; then
+  echo -e "${COL_BG_RED}'annotation.json' is missing${COL_RESET}"
+  exit 1
+fi
+
+# Lint the annotation file (for structural errors).
+
+if ! jq empty <"$ANNOTATION_FILE"; then
+  echo "Invalid JSON, please check the annotation JSON"
+  lint_failed
+fi
+
+# Check required keys.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+readarray -t annotation_keys <<<"$(jq -r 'keys_unsorted | .[]' $ANNOTATION_FILE)"
+
+for key in "${REQUIRED_KEYS[@]}"
+do
+  if ! in_array "$key" "${annotation_keys[@]}"; then
+    MISSING_KEYS+=("'$key'")
+  fi
+done
+
+for key in "${annotation_keys[@]}"
+do
+  if ! in_array "$key" "${VALID_KEYS[@]}"; then
+    INVALID_KEYS+=("'$key'")
+  fi
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation JSON:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation JSON:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_KEYS[@]}" -gt 0 ] || [ "${#INVALID_VALUES[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+# Check specific annotation key: `type`
+
+TYPE=$(jq -r '.type' < $ANNOTATION_FILE)
+
+if ! in_array "$TYPE" "${VALID_WRAPPER_TYPES[@]}"; then
+  echo "Invalid type '$TYPE', please choose one of the following types:"
+  printf "'%s'\n" "${VALID_WRAPPER_TYPES[@]}"
+  validation_failed
+fi
+
+# Check annotation parameters section.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+INVALID_VALUES=()
+MISSING_OPTION_LIST_KEYS=()
+INVALID_OPTION_LIST_KEYS=()
+NUM_PARAMS=$(jq '.parameters | length' $ANNOTATION_FILE)
+
+for (( i=0; i<=NUM_PARAMS-1; i++ ))
+do
+  readarray -t param_keys <<<"$(jq -r '.parameters['"$i"'] | keys | .[]' $ANNOTATION_FILE)"
+
+  for key in "${REQUIRED_PARAMETER_KEYS[@]}"
+  do
+    if ! in_array "$key" "${param_keys[@]}"; then
+    MISSING_KEYS+=("Parameter #$((i+1)): '$key'")
+  fi
+  done
+
+  for key in "${param_keys[@]}"
+  do
+    if ! in_array "$key" "${VALID_PARAMETER_KEYS[@]}"; then
+        INVALID_KEYS+=("Parameter #$((i+1)): '$key'")
+    fi
+  done
+
+  type_value="$(jq -r '.parameters['"$i"'].type' $ANNOTATION_FILE)"
+
+  if ! in_array "$type_value" "${VALID_PARAMETER_TYPES[@]}"; then
+    INVALID_VALUES+=("Parameter #$((i+1)): field 'type' contains an invalid value \"$type_value\" (check reference for valid types)")
+  fi
+
+  # Check option list keys
+  if in_array "optionList" "${param_keys[@]}"; then
+    readarray -t NUM_OPTIONS <<<"$(jq -r '.parameters['"$i"'].optionList | length' $ANNOTATION_FILE)"
+
+    for (( j=0; j<=NUM_OPTIONS-1; j++ ))
+    do
+      readarray -t option_keys <<<"$(jq -r '.parameters['"$i"'].optionList['"$j"'] | keys | .[]' $ANNOTATION_FILE)"
+
+      # echo "${option_keys[@]}"
+
+      for key in "${REQUIRED_PARAMETER_OPTION_LIST_KEYS[@]}"
+      do
+        if ! in_array "$key" "${option_keys[@]}"; then
+        MISSING_OPTION_LIST_KEYS+=("Parameter #$((i+1)) optionList #$((j+1)): '$key'")
+      fi
+      done
+
+      for key in "${option_keys[@]}"
+      do
+        if ! in_array "$key" "${REQUIRED_PARAMETER_OPTION_LIST_KEYS[@]}"; then
+            INVALID_OPTION_LIST_KEYS+=("Parameter #$((i+1)) optionList #$((j+1)): '$key'")
+        fi
+      done
+    done
+  fi
+
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation PARAMETER section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_OPTION_LIST_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation PARAMETER.optionList section:"
+  for val in "${MISSING_OPTION_LIST_KEYS[@]}"
+  do
+    echo "$val"
+  done
+fi
+
+if [ "${#INVALID_VALUES[@]}" -gt 0 ]; then
+  echo "The following PARAMETER values are invalid:"
+  for val in "${INVALID_VALUES[@]}"
+  do
+    echo "$val"
+  done
+fi
+
+if [ "${#INVALID_OPTION_LIST_KEYS[@]}" -gt 0 ]; then
+  echo "The following PARAMETER.optionList keys are invalid:"
+  for val in "${INVALID_OPTION_LIST_KEYS[@]}"
+  do
+    echo "$val"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation PARAMETER section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_KEYS[@]}" -gt 0 ] || [ "${#INVALID_VALUES[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+if [ "${#MISSING_OPTION_LIST_KEYS[@]}" -gt 0 ] || [ "${#INVALID_OPTION_LIST_KEYS[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+# Check annotation input section.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+NUM_INPUTS=$(jq '.inputs | length' $ANNOTATION_FILE)
+
+for (( i=0; i<=NUM_INPUTS-1; i++ ))
+do
+  readarray -t input_keys <<<"$(jq -r '.inputs['"$i"'] | keys | .[]' $ANNOTATION_FILE)"
+
+  for key in "${REQUIRED_INPUT_OUTPUT_KEYS[@]}"
+  do
+    if ! in_array "$key" "${input_keys[@]}"; then
+      MISSING_KEYS+=("Input $((i+1)): '$key'")
+    fi
+  done
+
+  for key in "${input_keys[@]}"
+  do
+    if ! in_array "$key" "${VALID_INPUT_OUTPUT_KEYS[@]}"; then
+      INVALID_KEYS+=("Input $((i+1)): '$key'")
+    fi
+  done
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation INPUT section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation INPUT section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+# Check annotation output section.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+NUM_OUTPUTS=$(jq '.outputs | length' $ANNOTATION_FILE)
+
+for (( i=0; i<=NUM_OUTPUTS-1; i++ ))
+do
+  readarray -t output_keys <<<"$(jq -r '.outputs['"$i"'] | keys | .[]' $ANNOTATION_FILE)"
+
+  for key in "${REQUIRED_INPUT_OUTPUT_KEYS[@]}"
+  do
+    if ! in_array "$key" "${output_keys[@]}"; then
+      MISSING_KEYS+=("Output $((i+1)): '$key'")
+    fi
+  done
+
+  for key in "${output_keys[@]}"
+  do
+    if ! in_array "$key" "${VALID_INPUT_OUTPUT_KEYS[@]}"; then
+      INVALID_KEYS+=("Input $((i+1)): '$key'")
+    fi
+  done
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation OUTPUT section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation OUTPUT section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+# Check annotation resources section.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+readarray -t resource_keys <<<"$(jq -r '.resources | keys_unsorted | .[]' $ANNOTATION_FILE)"
+
+for key in "${REQUIRED_RESOURCE_KEYS[@]}"
+do
+  if ! in_array "$key" "${resource_keys[@]}"; then
+    MISSING_KEYS+=("'$key'")
+  fi
+done
+
+if [ -n "${resource_keys[*]}" ]; then
+  for key in "${resource_keys[@]}"
+  do
+    if ! in_array "$key" "${VALID_RESOURCE_KEYS[@]}"; then
+      INVALID_KEYS+=("'$key'")
+    fi
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation RESOURCES section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation RESOURCES section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_VALUES[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+# Check annotation dependencies section.
+
+NUM_DEPS=$(jq '.dependencies | length' $ANNOTATION_FILE)
+
+for (( i=0; i<=NUM_DEPS-1; i++ ))
+do
+  readarray -t dep_keys <<<"$(jq -r '.dependencies['"$i"'] | keys | .[]' $ANNOTATION_FILE)"
+
+  for key in "${REQUIRED_DEPENDENCY_KEYS[@]}"
+  do
+    if ! in_array "$key" "${dep_keys[@]}"; then
+      MISSING_KEYS+=("Dependency $((i+1)): '$key'")
+    fi
+  done
+
+  for key in "${dep_keys[@]}"
+  do
+    if ! in_array "$key" "${VALID_DEPENDENCY_KEYS[@]}"; then
+      INVALID_KEYS+=("Dependency $((i+1)): '$key'")
+    fi
+  done
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation DEPENDENCIES section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation DEPENDENCIES section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+
+# Check annotation bugs section.
+
+MISSING_KEYS=()
+INVALID_KEYS=()
+readarray -t contact_keys <<<"$(jq -r '.bugs | keys_unsorted | .[]' $ANNOTATION_FILE)"
+
+for key in "${REQUIRED_CONTACT_FOR_BUGS_KEYS[@]}"
+do
+  if ! in_array "$key" "${contact_keys[@]}"; then
+    MISSING_KEYS+=("'$key'")
+  fi
+done
+
+if [ -n "${contact_keys[*]}" ]; then
+  for key in "${contact_keys[@]}"
+  do
+
+    if ! in_array "$key" "${VALID_CONTACT_FOR_BUGS_KEYS[@]}"; then
+      INVALID_KEYS+=("'$key'")
+    fi
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the annotation BUGS section:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#INVALID_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are not allowed in the annotation BUGS section:"
+  for key in "${INVALID_KEYS[@]}"
+  do
+    echo "$key"
+  done
+fi
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ] || [ "${#INVALID_VALUES[@]}" -gt 0 ]; then
+  validation_failed
+fi
+
+
+# -----------------------------------------------------
+# Check execution parameters
+# -----------------------------------------------------
+
+declare -a REQUIRED_EXEC_PARAMS_KEYS=( \
+  "name" \
+  "defaultValue" \
+  "value" \
+)
+
+MISSING_KEYS=()
+NUM_PARAMS=$(jq '.parameters | length' $EXECUTION_PARAMS_FILE)
+
+for (( i=0; i<=NUM_PARAMS-1; i++ ))
+do
+  readarray -t param_keys <<<"$(jq -r '.parameters['"$i"'] | keys | .[]' $EXECUTION_PARAMS_FILE)"
+
+  for key in "${REQUIRED_EXEC_PARAMS_KEYS[@]}"
+  do
+    if ! in_array "$key" "${param_keys[@]}"; then
+      MISSING_KEYS+=("Parameter $((i+1)): '$key'")
+    fi
+  done
+done
+
+if [ "${#MISSING_KEYS[@]}" -gt 0 ]; then
+  echo "The following keys are required and missing in the execution parameters:"
+  for key in "${MISSING_KEYS[@]}"
+  do
+    echo "$key"
+  done
+
+ validation_failed
+fi
+
+# Check if the parameter names are also defined in the annotation JSON
+
+NAMES_NOT_DEFINED=()
+readarray -t ANNOTATION_PARAM_NAMES <<<"$(jq -r '.parameters[] | .name' $ANNOTATION_FILE)"
+readarray -t EXECUTION_PARAM_NAMES <<<"$(jq -r '.parameters[] | .name' $EXECUTION_PARAMS_FILE)"
+
+for name in "${EXECUTION_PARAM_NAMES[@]}"
+do
+  if ! in_array "$name" "${ANNOTATION_PARAM_NAMES[@]}"; then
+    NAMES_NOT_DEFINED+=("'$name'")
+  fi
+done
+
+if [ "${#NAMES_NOT_DEFINED[@]}" -gt 0 ]; then
+  echo "The following execution parameter names are not defined in the annotation jSON:"
+  for name in "${NAMES_NOT_DEFINED[@]}"
+  do
+    echo "$name"
+  done
+
+  validation_failed
+fi
+
+# -----------------------------------------------------
+# Run docker image with execution parameters
+# -----------------------------------------------------
+
+DOCKER_IMAGE=$(jq -r '.dockerImage' < $ANNOTATION_FILE)
+DOCKER_IMAGE_VERSION=$(jq -r '.version' < $ANNOTATION_FILE)
+
+# It seems that every parameter is always a string, and 2 types are used, `String` and `List` (comma sep. string).
+# In the old wrappers we can even see boolean values being `String` with with value `TRUE`, so we will treat
+# every parameter value as a string (no type casting will be done). Is exec param value type relevant at all ?
+
+readarray -t EXEC_PARAMS < <(jq -c '.parameters[] | [.name, (.value // .defaultValue | tostring)]' data/execution-parameters.json)
+
+DOCKER_ARGS=""
+
+for param in "${EXEC_PARAMS[@]}"
+do
+  param_name=$(echo $param | jq -r '.[0]')
+  param_value=$(echo $param | jq -r '.[1]')
+  DOCKER_ARGS+=" --${param_name}=${param_value}"
+done
+
+if [ "$DOCKER_ARGS" = "" ]; then
+  echo "WARNING: No parameters defined."
+  DOCKER_ARGS=""
+fi
+
+DOCKER_CMD="docker run \
+  -v $(pwd)/data/inputs:/mnt/inputs \
+  -v $(pwd)/data/outputs:/mnt/outputs \
+  $DOCKER_IMAGE:$DOCKER_IMAGE_VERSION $DOCKER_ARGS"
+
+eval "$DOCKER_CMD"
+
+# If the wrapper was successfully executed we should receive an exit status 0
+# otherwise we likely will see an exception that was thrown in the wrapper script.
+DOCKER_EXIT_CODE=$(echo $?)
+
+if [ $DOCKER_EXIT_CODE == "0" ] ; then
+  echo -e "${COL_FG_GREEN}Wrapper was successfully executed${COL_RESET}"
+fi

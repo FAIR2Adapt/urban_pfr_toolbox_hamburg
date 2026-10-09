@@ -1,0 +1,259 @@
+{
+  "@context": "https://w3id.org/ro/crate/1.1/context",
+  "@graph": [
+    {
+      "@id": "ro-crate-metadata.json",
+      "@type": "CreativeWork",
+      "conformsTo": [
+        {"@id": "https://w3id.org/ro/crate/1.1"},
+        {"@id": "https://w3id.org/workflowhub/workflow-ro-crate/1.0"}
+      ],
+      "about": {"@id": "./"}
+    },
+    {
+      "@id": "./",
+      "@type": "Dataset",
+      "name": "Urban Pluvial Flood Risk Toolbox",
+      "description": "A modular and configurable Python toolbox for urban pluvial flood risk assessment. Implements the IPCC risk framework (Risk = Hazard × Exposure × Vulnerability) to produce two risk indices: PFRMA (mobility & accessibility) and PFRWB (well-being).",
+      "license": {"@id": "https://spdx.org/licenses/MIT"},
+      "datePublished": "2026-02-17",
+      "author": [
+        {"@id": "#fair2adapt"}
+      ],
+      "mainEntity": {"@id": "run_analysis.py"},
+      "hasPart": [
+        {"@id": "run_analysis.py"},
+        {"@id": "urban_pfr/"},
+        {"@id": "data/inputs/config.yaml"}
+      ]
+    },
+    {
+      "@id": "#fair2adapt",
+      "@type": "Organization",
+      "name": "FAIR2Adapt",
+      "url": "https://fair2adapt.eu"
+    },
+    {
+      "@id": "https://spdx.org/licenses/MIT",
+      "@type": "CreativeWork",
+      "name": "MIT License",
+      "identifier": "MIT"
+    },
+    {
+      "@id": "run_analysis.py",
+      "@type": ["File", "SoftwareSourceCode", "ComputationalWorkflow"],
+      "name": "Urban Pluvial Flood Risk Analysis",
+      "description": "Entry point for the urban pluvial flood risk assessment pipeline. Orchestrates validation, social vulnerability analysis (TOPSIS), exposure calculation, hazard metrics, risk combination, and visualization.",
+      "programmingLanguage": {"@id": "#python"},
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/ComputationalWorkflow/1.0-RELEASE"},
+      "input": [
+        {"@id": "#param-buildings-gdb"},
+        {"@id": "#param-buildings"},
+        {"@id": "#param-statistical-units"},
+        {"@id": "#param-streets"},
+        {"@id": "#param-flood-levels"},
+        {"@id": "#param-config"},
+        {"@id": "#param-boundary"}
+      ],
+      "output": [
+        {"@id": "#param-output-risk"},
+        {"@id": "#param-output-vulnerability"}
+      ]
+    },
+    {
+      "@id": "#python",
+      "@type": "ComputerLanguage",
+      "name": "Python",
+      "identifier": "https://www.python.org/",
+      "version": "3.9+"
+    },
+    {
+      "@id": "urban_pfr/",
+      "@type": "Dataset",
+      "name": "urban_pfr package",
+      "description": "Python package implementing the pluvial flood risk pipeline modules: validation, indicators (TOPSIS), exposure, hazard, risk, and visualization."
+    },
+
+    {
+      "@id": "#param-buildings-gdb",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "buildings_gdb",
+      "description": "ArcGIS File Geodatabase containing the core spatial datasets: building footprints with attributes (residential area, floors, building type), statistical units with demographic indicators (sensitivity and coping capacity fields), and street network outlines.",
+      "encodingFormat": "application/x-filegdb",
+      "valueRequired": false,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/Building"}
+    },
+    {
+      "@id": "#param-buildings",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "buildings",
+      "description": "Building footprints with attributes (residential area, floors, building type). Alternative to buildings_gdb when inputs are provided as individual files.",
+      "encodingFormat": ["application/flatgeobuf", "application/geopackage+sqlite3", "application/geo+json"],
+      "valueRequired": false,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/Building"},
+      "variableMeasured": [
+        {"@id": "#expected-elderly-singles"},
+        {"@id": "#expected-children"},
+        {"@id": "#expected-welfare-recipients"},
+        {"@id": "#expected-education-quota"},
+        {"@id": "#expected-residents"},
+        {"@id": "#expected-living-area"},
+        {"@id": "#expected-floors"},
+        {"@id": "#expected-building-type"},
+        {"@id": "#expected-statistical-unit"}
+      ]
+    },
+    {
+      "@id": "#param-statistical-units",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "statistical_units",
+      "description": "Statistical units with demographic indicators (sensitivity and coping capacity fields).",
+      "encodingFormat": ["application/geopackage+sqlite3", "application/geo+json"],
+      "valueRequired": false,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/StatisticalUnit"}
+    },
+    {
+      "@id": "#param-streets",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "streets",
+      "description": "Street network outlines for hazard mobility and accessibility analysis.",
+      "encodingFormat": ["application/flatgeobuf", "application/geopackage+sqlite3", "application/geo+json"],
+      "valueRequired": false,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/RoadLink"}
+    },
+    {
+      "@id": "#param-flood-levels",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "flood_levels",
+      "description": "Directory of geospatial files representing pluvial flood depth scenarios. Each file covers one depth level (e.g. 30cm, 40cm, ... 100cm). Supported formats: FlatGeobuf, GeoJSON, Shapefile, GeoPackage.",
+      "encodingFormat": ["application/flatgeobuf", "application/geo+json", "application/x-shapefile", "application/geopackage+sqlite3"],
+      "valueRequired": true,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/HazardArea"}
+    },
+    {
+      "@id": "#param-config",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "config",
+      "description": "YAML configuration file specifying project settings (CRS, city name), schema field mappings, hazard parameters (buffer distances, flood threshold), risk weights, TOPSIS weights, and visualization options.",
+      "encodingFormat": "application/x-yaml",
+      "valueRequired": true
+    },
+    {
+      "@id": "#param-boundary",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "boundary",
+      "description": "Study area boundary polygon used to clip the analysis extent. If not provided, the convex hull of the building footprints is used.",
+      "encodingFormat": "application/geopackage+sqlite3",
+      "valueRequired": false,
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/AdministrativeUnit"}
+    },
+
+    {
+      "@id": "#expected-elderly-singles",
+      "@type": "PropertyValue",
+      "name": "elderly_singles",
+      "propertyID": "https://w3id.org/np/RA-iadopt-elderly-singles-placeholder",
+      "description": "Count of elderly singles (65+) per statistical unit",
+      "additionalType": "sensitivity_indicator"
+    },
+    {
+      "@id": "#expected-children",
+      "@type": "PropertyValue",
+      "name": "children",
+      "propertyID": "https://w3id.org/np/RA-iadopt-children-under-10-placeholder",
+      "description": "Count of children under 10 per statistical unit",
+      "additionalType": "sensitivity_indicator"
+    },
+    {
+      "@id": "#expected-welfare-recipients",
+      "@type": "PropertyValue",
+      "name": "welfare_recipients",
+      "propertyID": "https://w3id.org/np/RA-iadopt-welfare-recipients-placeholder",
+      "description": "Count of welfare recipients per statistical unit",
+      "additionalType": "coping_indicator"
+    },
+    {
+      "@id": "#expected-education-quota",
+      "@type": "PropertyValue",
+      "name": "education_quota",
+      "propertyID": "https://w3id.org/np/RA-iadopt-education-quota-placeholder",
+      "description": "Count of people without high school diploma per statistical unit",
+      "additionalType": "coping_indicator"
+    },
+    {
+      "@id": "#expected-residents",
+      "@type": "PropertyValue",
+      "name": "residents",
+      "propertyID": "https://w3id.org/np/RA-iadopt-resident-count-placeholder",
+      "description": "Total resident count per statistical unit",
+      "additionalType": "residents_col"
+    },
+    {
+      "@id": "#expected-living-area",
+      "@type": "PropertyValue",
+      "name": "living_area",
+      "propertyID": "https://w3id.org/np/RA-iadopt-living-area-placeholder",
+      "description": "Total housing area per statistical unit (m²)",
+      "additionalType": "living_area_col"
+    },
+    {
+      "@id": "#expected-floors",
+      "@type": "PropertyValue",
+      "name": "floors",
+      "propertyID": "https://w3id.org/np/RA-iadopt-building-floors-placeholder",
+      "description": "Number of floors per building",
+      "additionalType": "floors_col"
+    },
+    {
+      "@id": "#expected-building-type",
+      "@type": "PropertyValue",
+      "name": "building_type",
+      "propertyID": "https://w3id.org/np/RA-iadopt-building-type-placeholder",
+      "description": "Building use type (1=residential, 2=mixed-use)",
+      "additionalType": "building_type_col"
+    },
+    {
+      "@id": "#expected-statistical-unit",
+      "@type": "PropertyValue",
+      "name": "statistical_unit",
+      "propertyID": "https://w3id.org/np/RA-iadopt-statistical-unit-id-placeholder",
+      "description": "Statistical unit identifier for spatial aggregation",
+      "additionalType": "stat_unit_col"
+    },
+
+    {
+      "@id": "#param-output-risk",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "risk_layer",
+      "description": "Building-level flood risk indices (PFRMA for mobility/accessibility, PFRWB for well-being) as Thiessen polygons with Delaunay-smoothed variants. Contains columns: RIMA, RIWB, RIMA_smooth, RIWB_smooth.",
+      "encodingFormat": ["application/geopackage+sqlite3", "application/flatgeobuf"],
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/RiskZone"}
+    },
+    {
+      "@id": "#param-output-vulnerability",
+      "@type": "FormalParameter",
+      "conformsTo": {"@id": "https://bioschemas.org/profiles/FormalParameter/1.0-RELEASE"},
+      "name": "vulnerability_layer",
+      "description": "Statistical units with social vulnerability indicators: Sensitivity, Coping Capacity, Social Vulnerability Index (SVI), and flood-specific vulnerability (SVPF).",
+      "encodingFormat": ["application/geopackage+sqlite3", "application/flatgeobuf"],
+      "additionalType": {"@id": "http://inspire.ec.europa.eu/featureconcept/StatisticalUnit"}
+    },
+
+    {
+      "@id": "data/inputs/config.yaml",
+      "@type": "File",
+      "name": "Hamburg configuration",
+      "description": "Example YAML configuration for the Hamburg case study (CS3).",
+      "encodingFormat": "application/x-yaml",
+      "exampleOfWork": {"@id": "#param-config"}
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 """
-exposure.py – Exposure calculation for pluvial flood risk.
+Exposure calculation for pluvial flood risk.
 """
 
 import numpy as np
@@ -15,26 +15,34 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
                                  living_area_col='LivingArea',
                                  floors_col='Floors',
                                  building_type_col='Building_type',
-                                 stat_unit_col='StatisticalUnit'):
+                                 stat_unit_col='StatisticalUnit',
+                                 residential_types=None,
+                                 non_residential_floor_deduction=1):
     """
     Distribute statistical-unit population to individual buildings
     proportionally by residential floor area.
 
-    R = (Area_house / LivingArea_unit) * Residents_unit
-
-    Area_house = (Floors - (BuildingType - 1)) * FootprintArea
-      Type 1 (residential): all floors count
-      Type 2 (mixed): ground floor excluded
-      Type 3+: no residential area
+    Parameters
+    ----------
+    residential_types : list, optional
+        Building type values considered residential (default: [1]).
+        Residential buildings use all floors; non-residential buildings
+        have `non_residential_floor_deduction` floors deducted.
+    non_residential_floor_deduction : int
+        Number of floors deducted for non-residential buildings (default: 1).
     """
     buildings_result = buildings_gdf.copy()
+    if residential_types is None:
+        residential_types = [1]
 
     required_cols = [floors_col, building_type_col]
     missing = [c for c in required_cols if c not in buildings_result.columns]
     if missing:
         raise ValueError(f"Missing columns in buildings: {missing}")
 
-    # residential floor area per building
+    # Residential floor area per building: deduct (building_type - 1) floors
+    # for non-residential use (type 1 = fully residential, type 2 = 1 floor
+    # non-residential, type 3 = 2 floors non-residential, etc.)
     buildings_result['Area_house'] = (
         (buildings_result[floors_col] - (buildings_result[building_type_col] - 1))
         * buildings_result.geometry.area
@@ -42,33 +50,32 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
     buildings_result.loc[buildings_result['Area_house'] < 0, 'Area_house'] = 0
 
     if stat_unit_col in buildings_result.columns:
-        # fast path: ID-based join
-        unit_data = {}
-        for idx, unit in statistical_units_gdf.iterrows():
-            uid = unit.get(stat_unit_col, idx)
-            unit_data[uid] = {
-                'residents': unit.get(residents_col, 0),
-                'living_area': unit.get(living_area_col, 1)
-            }
+        # ── Vectorized path: merge + array arithmetic ──
+        unit_lookup = statistical_units_gdf[[stat_unit_col, residents_col, living_area_col]].copy()
+        unit_lookup = unit_lookup.rename(columns={
+            residents_col: '_unit_residents',
+            living_area_col: '_unit_living_area',
+        })
 
-        residents_list = []
-        for idx, bld in buildings_result.iterrows():
-            uid = bld.get(stat_unit_col)
-            if pd.notna(uid) and uid in unit_data:
-                info = unit_data[uid]
-                if info['living_area'] > 0 and bld['Area_house'] > 0:
-                    residents_list.append(
-                        bld['Area_house'] / info['living_area'] * info['residents']
-                    )
-                else:
-                    residents_list.append(0)
-            else:
-                residents_list.append(0)
+        merged = buildings_result.merge(
+            unit_lookup, on=stat_unit_col, how='left'
+        )
 
-        buildings_result['R'] = residents_list
+        mask = (
+            merged['_unit_living_area'].notna()
+            & (merged['_unit_living_area'] > 0)
+            & (merged['Area_house'] > 0)
+        )
+
+        buildings_result['R'] = 0.0
+        buildings_result.loc[mask, 'R'] = (
+            merged.loc[mask, 'Area_house']
+            / merged.loc[mask, '_unit_living_area']
+            * merged.loc[mask, '_unit_residents']
+        )
 
     else:
-        # fallback: spatial join via centroids
+        # Fallback: spatial join via centroids (vectorized sjoin, not iterrows)
         centroids = buildings_result.copy()
         centroids.geometry = centroids.geometry.centroid
 
@@ -78,18 +85,17 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
             how='left', predicate='within'
         )
 
-        residents_list = []
-        for idx in buildings_result.index:
-            if idx in joined.index:
-                row = joined.loc[idx]
-                area = buildings_result.loc[idx, 'Area_house']
-                la = row.get(living_area_col, 0)
-                res = row.get(residents_col, 0)
-                residents_list.append((area / la) * res if la > 0 and area > 0 else 0)
-            else:
-                residents_list.append(0)
+        # Handle potential duplicate matches by keeping the first
+        joined = joined[~joined.index.duplicated(keep='first')]
 
-        buildings_result['R'] = residents_list
+        la = joined[living_area_col].fillna(0).values
+        res = joined[residents_col].fillna(0).values
+        area = buildings_result.loc[joined.index, 'Area_house'].values
+
+        r_vals = np.where((la > 0) & (area > 0), (area / la) * res, 0.0)
+
+        buildings_result['R'] = 0.0
+        buildings_result.loc[joined.index, 'R'] = r_vals
 
     print(f"Exposure EMA: {buildings_result['R'].sum():.0f} residents across "
           f"{(buildings_result['R'] > 0).sum()}/{len(buildings_result)} buildings")
@@ -99,27 +105,34 @@ def calculate_exposure_residents(buildings_gdf, statistical_units_gdf,
 def calculate_exposure_wellbeing(buildings_gdf,
                                  floors_col='Floors',
                                  building_type_col='Building_type',
-                                 residents_col='R'):
+                                 residents_col='R',
+                                 residential_types=None):
     """
     Ground floor residents (EWB).
-      Type 1: R_G = R / Floors
-      Type 2+: R_G = 0 (ground floor is commercial or non-residential)
+
+    Parameters
+    ----------
+    residential_types : list, optional
+        Building type values considered residential (default: [1]).
+        Only residential buildings get ground-floor residents.
     """
     buildings_result = buildings_gdf.copy()
+    if residential_types is None:
+        residential_types = [1]
 
     required_cols = [floors_col, building_type_col, residents_col]
     missing = [c for c in required_cols if c not in buildings_result.columns]
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    r_g = []
-    for idx, bld in buildings_result.iterrows():
-        if bld[building_type_col] == 1 and bld[floors_col] > 0:
-            r_g.append(bld[residents_col] / bld[floors_col])
-        else:
-            r_g.append(0)
+    # Only residential buildings get ground-floor residents
+    mask = (buildings_result[building_type_col].isin(residential_types)) & (buildings_result[floors_col] > 0)
 
-    buildings_result['R_G'] = [max(0, v) for v in r_g]
+    buildings_result['R_G'] = 0.0
+    buildings_result.loc[mask, 'R_G'] = (
+        buildings_result.loc[mask, residents_col]
+        / buildings_result.loc[mask, floors_col]
+    ).clip(lower=0)
 
     print(f"Exposure EWB: {buildings_result['R_G'].sum():.0f} ground-floor residents across "
           f"{(buildings_result['R_G'] > 0).sum()}/{len(buildings_result)} buildings")

@@ -244,8 +244,10 @@ def validate_input_data(config_or_path, detailed=True):
         report['errors'].extend(crs_issues)
         report['valid'] = False
 
-    # --- 4. Required fields ---
-    for field in ['ID', 'Floors', 'Building_type']:
+    # --- 4. Required fields (use config names) ---
+    floors_col = schema.get('floors_col', 'Floors')
+    building_type_col = schema.get('building_type_col', 'Building_type')
+    for field in ['ID', floors_col, building_type_col]:
         if field not in buildings.columns:
             report['errors'].append(f"Buildings missing required field: {field}")
             report['valid'] = False
@@ -305,16 +307,10 @@ def validate_input_data(config_or_path, detailed=True):
             report['errors'].append(f"{n_dup} duplicate building IDs")
             report['valid'] = False
 
-    if 'Floors' in buildings.columns:
-        bad = (buildings['Floors'] <= 0).sum()
+    if floors_col in buildings.columns:
+        bad = (buildings[floors_col] <= 0).sum()
         if bad:
-            report['errors'].append(f"{bad} buildings have Floors <= 0")
-            report['valid'] = False
-
-    if 'Building_type' in buildings.columns:
-        bad = (~buildings['Building_type'].isin([1, 2, 3])).sum()
-        if bad:
-            report['errors'].append(f"{bad} buildings have invalid Building_type (must be 1/2/3)")
+            report['errors'].append(f"{bad} buildings have {floors_col} <= 0")
             report['valid'] = False
 
     invalid_geom = (~buildings.geometry.is_valid).sum()

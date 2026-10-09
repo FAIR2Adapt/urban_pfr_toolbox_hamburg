@@ -1,16 +1,121 @@
 """
-hazard.py – Flood hazard assessment.
+hazard.py – Flood hazard assessment (optimized).
 HMA: mobility/accessibility via street-buffer analysis.
 HWB: well-being via building-perimeter flood depth analysis.
+
+Performance strategy:
+  1. Split large geometries (streets) into a spatial grid of tiles
+  2. Use STRtree spatial index for fast candidate lookup
+  3. Use prepared geometries for fast intersection tests
+  4. Vectorized buffer creation
+  5. Every building is processed — none are skipped
 """
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from shapely import prepared
+from shapely.geometry import box
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
 from scipy.stats import lognorm
 import warnings
 
 warnings.filterwarnings('ignore')
+
+BATCH_LOG_SIZE = 10000
+GRID_TILE_SIZE = 500  # meters — split large geometries into tiles of this size
+
+
+def _split_to_tiles(gdf, tile_size=GRID_TILE_SIZE):
+    """
+    Split all geometries in a GeoDataFrame into a grid of tiles.
+    Returns a new GeoDataFrame where each row is a piece of the original
+    geometry clipped to a tile. This makes STRtree lookups and intersections
+    much faster because each piece is small.
+    """
+    # Skip costly unary_union when there's only one feature (e.g., streets layer)
+    if len(gdf) == 1:
+        all_geom = gdf.geometry.iloc[0]
+    else:
+        all_geom = unary_union(gdf.geometry)
+    minx, miny, maxx, maxy = all_geom.bounds
+
+    tiles = []
+    x = minx
+    while x < maxx:
+        y = miny
+        while y < maxy:
+            tile_box = box(x, y, x + tile_size, y + tile_size)
+            try:
+                clipped = all_geom.intersection(tile_box)
+                if not clipped.is_empty and clipped.area > 0:
+                    tiles.append(clipped)
+            except Exception:
+                pass
+            y += tile_size
+        x += tile_size
+
+    if not tiles:
+        return gdf
+
+    print(f"    Split into {len(tiles)} tiles ({tile_size}m grid)")
+    return gpd.GeoDataFrame(geometry=tiles, crs=gdf.crs)
+
+
+def _compute_flood_fraction(ring_geom, flood_tree, flood_geoms, flood_prep):
+    """
+    Compute fraction of ring_geom covered by flood polygons.
+    Uses STRtree for candidate lookup, prepared geometry for fast tests.
+    Returns float in [0, 1].
+    """
+    if ring_geom.is_empty:
+        return 0.0
+
+    ring_area = ring_geom.area
+    if ring_area <= 0:
+        return 0.0
+
+    candidates = flood_tree.query(ring_geom)
+    if len(candidates) == 0:
+        return 0.0
+
+    flooded_area = 0.0
+    for idx in candidates:
+        if flood_prep[idx].intersects(ring_geom):
+            try:
+                ix = ring_geom.intersection(flood_geoms[idx])
+                flooded_area += ix.area
+            except Exception:
+                continue
+
+    return min(flooded_area / ring_area, 1.0)
+
+
+def _compute_street_area_in_ring(ring_geom, street_tree, street_geoms, street_prep):
+    """
+    Compute the intersection of a ring with street tiles.
+    Returns the street-in-ring geometry and its total area.
+    """
+    candidates = street_tree.query(ring_geom)
+    if len(candidates) == 0:
+        return None, 0.0
+
+    parts = []
+    for idx in candidates:
+        if street_prep[idx].intersects(ring_geom):
+            try:
+                ix = ring_geom.intersection(street_geoms[idx])
+                if not ix.is_empty and ix.area > 0:
+                    parts.append(ix)
+            except Exception:
+                continue
+
+    if not parts:
+        return None, 0.0
+
+    merged = unary_union(parts)
+    return merged, merged.area
 
 
 def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gdf,
@@ -24,56 +129,79 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
     HMA = lognorm.cdf(max_flood_fraction * 4, shape_param)
     """
     buildings_result = buildings_gdf.copy()
+    n_total = len(buildings_result)
 
     if buildings_result.crs != streets_gdf.crs:
         streets_gdf = streets_gdf.to_crs(buildings_result.crs)
     if buildings_result.crs != flood_gdf.crs:
         flood_gdf = flood_gdf.to_crs(buildings_result.crs)
 
-    hma_values = []
+    # Split streets into tiles for fast per-building intersection
+    print(f"  Preparing streets spatial index ...")
+    streets_tiled = _split_to_tiles(streets_gdf, tile_size=GRID_TILE_SIZE)
+    street_geoms = list(streets_tiled.geometry)
+    street_tree = STRtree(street_geoms)
+    street_prep = [prepared.prep(g) for g in street_geoms]
 
-    for idx, building in buildings_result.iterrows():
-        building_geom = building.geometry
-        flood_percentages = []
+    # Prepare flood spatial index
+    print(f"  Preparing flood spatial index ...")
+    flood_geoms = list(flood_gdf.geometry)
+    flood_tree = STRtree(flood_geoms)
+    flood_prep = [prepared.prep(g) for g in flood_geoms]
 
-        for buffer_dist in buffers:
-            buffer_geom = building_geom.buffer(buffer_dist)
-            ring_buffer = buffer_geom.difference(building_geom)
+    max_flood_pct = np.zeros(n_total)
 
-            if buffer_dist > 5:
-                streets_in_buffer = streets_gdf[streets_gdf.intersects(ring_buffer)]
-                if len(streets_in_buffer) == 0:
-                    flood_percentages.append(0)
-                    continue
+    sorted_buffers = sorted(buffers)
 
-                street_buffer_intersection = streets_in_buffer.intersection(ring_buffer)
-                total_street_area = street_buffer_intersection.area.sum()
+    outers = {d: buildings_result.geometry.buffer(d) for d in sorted_buffers}
 
-                if total_street_area < min_area_threshold:
-                    flood_percentages.append(0)
-                    continue
+    for idx_b, buffer_dist in enumerate(sorted_buffers):
+        print(f"  HMA buffer {buffer_dist}m ({n_total} buildings) ...")
 
-                flooded_streets = street_buffer_intersection.intersection(flood_gdf.unary_union)
-                flooded_area = flooded_streets.area.sum() if hasattr(flooded_streets, 'area') else 0
-                flood_pct = (flooded_area / total_street_area) * 100 if total_street_area > 0 else 0
+        outer = outers[buffer_dist]
+        # 15-to-30 m disjoint ring required by the paper / ArcGIS.
+        use_prev_outer_as_inner = idx_b >= 2
+        prev_outer = outers[sorted_buffers[idx_b - 1]] if use_prev_outer_as_inner else None
+
+        for i in range(n_total):
+            if i > 0 and i % BATCH_LOG_SIZE == 0:
+                print(f"    {i}/{n_total} ...")
+
+            building_geom = buildings_result.geometry.iloc[i]
+            inner = prev_outer.iloc[i] if use_prev_outer_as_inner else building_geom
+            ring = outer.iloc[i].difference(inner)
+
+            if ring.is_empty or ring.area <= 0:
+                continue
+
+            if buffer_dist <= 5:
+                # 5m buffer: direct flood fraction in the ring (no streets)
+                flood_pct = _compute_flood_fraction(
+                    ring, flood_tree, flood_geoms, flood_prep
+                ) * 100
             else:
-                flood_in_buffer = ring_buffer.intersection(flood_gdf.unary_union)
-                buffer_area = ring_buffer.area
-                flooded_area = flood_in_buffer.area if hasattr(flood_in_buffer, 'area') else 0
-                flood_pct = (flooded_area / buffer_area) * 100 if buffer_area > 0 else 0
+                # 15m / 15-to-30m buffers: flood fraction on streets within the ring
+                street_in_ring, total_street_area = _compute_street_area_in_ring(
+                    ring, street_tree, street_geoms, street_prep
+                )
 
-            flood_percentages.append(flood_pct)
+                if street_in_ring is None or total_street_area < min_area_threshold:
+                    continue
 
-        max_flood_pct = max(flood_percentages) if flood_percentages else 0
+                flood_pct = _compute_flood_fraction(
+                    street_in_ring, flood_tree, flood_geoms, flood_prep
+                ) * 100
 
-        if max_flood_pct > 0:
-            hma = lognorm.cdf(max_flood_pct / 100 * 4, shape_param)
-        else:
-            hma = 0
+            if flood_pct > max_flood_pct[i]:
+                max_flood_pct[i] = flood_pct
 
-        hma_values.append(hma)
-
-    buildings_result['HMA'] = hma_values
+    # Apply lognormal CDF
+    hma = np.where(
+        max_flood_pct > 0,
+        lognorm.cdf(max_flood_pct / 100 * 4, shape_param),
+        0.0
+    )
+    buildings_result['HMA'] = hma
 
     n = (buildings_result['HMA'] > 0).sum()
     print(f"HMA: {n}/{len(buildings_result)} buildings affected, "
@@ -84,46 +212,68 @@ def calculate_hazard_mobility_accessibility(buildings_gdf, streets_gdf, flood_gd
 def calculate_hazard_wellbeing(buildings_gdf, flood_layers_dict,
                                buffer_distance=2,
                                shape_param=0.25,
-                               depth_thresholds=[20, 30, 40, 50, 60, 70, 80, 90, 100]):
+                               depth_thresholds=[20, 30, 40, 50, 60, 70, 80, 90, 100],
+                               hwb_clip_max=None):
     """
     HWB per building: 2m ring buffer, for each flood depth compute
     flood fraction in buffer, apply lognorm.cdf, sum across depths.
 
     HWB = sum( lognorm.cdf(flood_pct_i * 4 / 100, shape) )
+
+    Parameters
+    ----------
+    hwb_clip_max : float or None
+        If None (default), HWB is left unclipped (real numbers).
+        If a number (e.g. 1.0), HWB values above this are clipped to it,
+        it reproduces the paper's *public* file where HWB ≤ 1, required for replication and loom
     """
     buildings_result = buildings_gdf.copy()
+    n_total = len(buildings_result)
 
     available_depths = [d for d in depth_thresholds if d in flood_layers_dict]
     if not available_depths:
         buildings_result['HWB'] = 0
         return buildings_result
 
-    hwb_values = np.zeros(len(buildings_result))
+    # Vectorized: compute all outer buffers once
+    print(f"  Computing {n_total} buffers ...")
+    outer = buildings_result.geometry.buffer(buffer_distance)
+
+    hwb_values = np.zeros(n_total)
 
     for depth in available_depths:
+        print(f"  HWB depth {depth}cm ...")
         flood_layer = flood_layers_dict[depth]
         if buildings_result.crs != flood_layer.crs:
             flood_layer = flood_layer.to_crs(buildings_result.crs)
 
-        flood_union = flood_layer.unary_union
+        # Build spatial index for this flood layer
+        flood_geoms = list(flood_layer.geometry)
+        flood_tree = STRtree(flood_geoms)
+        flood_prep = [prepared.prep(g) for g in flood_geoms]
 
-        for i, (idx, building) in enumerate(buildings_result.iterrows()):
-            buffer_geom = building.geometry.buffer(buffer_distance)
-            ring_buffer = buffer_geom.difference(building.geometry)
-            buffer_area = ring_buffer.area
+        for i in range(n_total):
+            if i > 0 and i % BATCH_LOG_SIZE == 0:
+                print(f"    {i}/{n_total} ...")
 
-            if buffer_area <= 0:
+            building_geom = buildings_result.geometry.iloc[i]
+            ring = outer.iloc[i].difference(building_geom)
+
+            if ring.is_empty or ring.area <= 0:
                 continue
 
-            flood_in_buffer = ring_buffer.intersection(flood_union)
-            flooded_area = flood_in_buffer.area if hasattr(flood_in_buffer, 'area') else 0
-            flood_pct = flooded_area / buffer_area
+            flood_frac = _compute_flood_fraction(ring, flood_tree, flood_geoms, flood_prep)
 
-            if flood_pct > 0:
-                hwb_values[i] += lognorm.cdf(flood_pct * 4, shape_param)
+            if flood_frac > 0:
+                hwb_values[i] += lognorm.cdf(flood_frac * 4, shape_param)
 
+    # Paper Eq.2 / ArcGIS Step2 do NOT clip 
+    # Optional clip is offered for the *public* view in paper figures
+    if hwb_clip_max is not None:
+        print(f"  Clipping HWB to [0, {hwb_clip_max}] (paper-public mode)")
+        hwb_values = np.clip(hwb_values, 0, float(hwb_clip_max))
     buildings_result['HWB'] = hwb_values
-
+    
     n = (buildings_result['HWB'] > 0).sum()
     print(f"HWB: {n}/{len(buildings_result)} buildings affected, "
           f"max={buildings_result['HWB'].max():.4f}")

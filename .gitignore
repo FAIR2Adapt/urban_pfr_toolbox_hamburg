@@ -13,12 +13,16 @@ dist/
 
 # Virtual environments
 venv/
+.env
 
+# Docker
+.dockerignore
+
+#data
+outputs/
 # IDEs
 .vscode/
 .idea/
-*.swp
-*.swo
 *~
 .DS_Store
 
@@ -32,16 +36,14 @@ htmlcov/
 
 # Project-specific: geodata (too large for git)
 outputs/
-Zenodo_v2_shared_cs3_data/
-data_backup_original/
 *.gdb/
 *.shp
 *.shx
 *.dbf
 *.prj
 *.cpg
-*.qpj
-*.gpkg
+#*.qpj
+#*.gpkg
 
 # Temporary
 *.tmp

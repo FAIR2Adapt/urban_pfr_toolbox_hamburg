@@ -1,17 +1,11 @@
 """
-risk.py – Risk calculation and spatial smoothing.
-Risk = Hazard^w * Exposure^w * Vulnerability^w (IPCC framework)
-Delaunay triangulation for spatial smoothing.
+Risk calculation (PFRMA, PFRWB) and Delaunay smoothing.
 """
 
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 from scipy.spatial import Delaunay
-from scipy.spatial.distance import cdist
-import warnings
-
-warnings.filterwarnings('ignore')
+from scipy import sparse
 
 
 def calculate_risk(buildings_gdf,
@@ -19,110 +13,247 @@ def calculate_risk(buildings_gdf,
                    hazard_col_wb='HWB',
                    exposure_col_ma='R',
                    exposure_col_wb='R_G',
-                   vulnerability_col='svpf',
+                   vulnerability_col='SVI',
                    weight_hazard=1.0,
                    weight_exposure=1.0,
-                   weight_vulnerability=1.0):
+                   weight_vulnerability=1.0,
+                   normalize_exposure=False,
+                   config=None):
     """
-    PFRMA = HMA^w * EMA^w * SVPF^w
-    PFRWB = HWB^w * EWB^w * SVPF^w
-    Default weights=1 so it simplifies to plain multiplication.
+    Calculate PFRMA and PFRWB risk indices.
+
+    Parameters
+    ----------
+    buildings_gdf : GeoDataFrame
+        Buildings with vulnerability, exposure, and hazard columns.
+    hazard_col_ma : str
+        Column name for mobility/accessibility hazard (HMA).
+    hazard_col_wb : str
+        Column name for well-being hazard (HWB).
+    exposure_col_ma : str
+        Column name for MA exposure (R = total residents).
+    exposure_col_wb : str
+        Column name for WB exposure (R_G = ground-floor residents).
+    vulnerability_col : str
+        Column name for social vulnerability (SVI).
+    weight_hazard, weight_exposure, weight_vulnerability : float
+        IPCC risk component weights (default: 1.0 each).
+    normalize_exposure : bool
+        If True, normalize exposure to [0,1] before calculation.
+        Default False — matches ArcGIS behavior (raw values).
+        Set via config['risk_settings']['normalize_exposure'].
+    config : dict, optional
+        Full config dict. If provided, reads weights and normalize_exposure.
+
+    Returns
+    -------
+    GeoDataFrame
+        Buildings with PFRMA and PFRWB columns added.
     """
     buildings_result = buildings_gdf.copy()
 
-    # PFRMA
-    cols_ma = [hazard_col_ma, exposure_col_ma, vulnerability_col]
-    missing_ma = [c for c in cols_ma if c not in buildings_result.columns]
+    # --- Read settings from config if provided ---
+    if config:
+        risk_cfg = config.get('risk_settings', {})
+        weight_hazard = risk_cfg.get('weight_hazard', weight_hazard)
+        weight_exposure = risk_cfg.get('weight_exposure', weight_exposure)
+        weight_vulnerability = risk_cfg.get('weight_vulnerability', weight_vulnerability)
+        normalize_exposure = risk_cfg.get('normalize_exposure', normalize_exposure)
 
-    if not missing_ma:
-        buildings_result['PFRMA'] = (
-            buildings_result[hazard_col_ma].fillna(0) ** weight_hazard *
-            buildings_result[exposure_col_ma].fillna(0) ** weight_exposure *
-            buildings_result[vulnerability_col].fillna(0) ** weight_vulnerability
-        )
+    w_h = weight_hazard
+    w_e = weight_exposure
+    w_v = weight_vulnerability
+
+    print(f"  Weights: vulnerability={w_v}, exposure={w_e}, hazard={w_h}")
+    print(f"  Normalize exposure: {normalize_exposure}")
+
+    # --- Extract columns ---
+    vuln = buildings_result[vulnerability_col].fillna(0).astype(float)
+    haz_ma = buildings_result[hazard_col_ma].fillna(0).astype(float)
+    haz_wb = buildings_result[hazard_col_wb].fillna(0).astype(float)
+    exp_ma = buildings_result[exposure_col_ma].fillna(0).astype(float)
+    exp_wb = buildings_result[exposure_col_wb].fillna(0).astype(float)
+
+    # --- Exposure normalization (ONLY if explicitly requested) ---
+    if normalize_exposure:
+        print("  ⚠️  Normalizing exposure to [0,1] — values will be compressed!")
+        max_ma = exp_ma.max()
+        max_wb = exp_wb.max()
+        if max_ma > 0:
+            exp_ma = exp_ma / max_ma
+        if max_wb > 0:
+            exp_wb = exp_wb / max_wb
     else:
+        print("  ✅ Using raw exposure values (matching ArcGIS)")
+
+    # --- Check for missing columns ---
+    required_ma = [vulnerability_col, exposure_col_ma, hazard_col_ma]
+    required_wb = [vulnerability_col, exposure_col_wb, hazard_col_wb]
+
+    missing_ma = [c for c in required_ma if c not in buildings_result.columns]
+    missing_wb = [c for c in required_wb if c not in buildings_result.columns]
+
+    # --- Calculate PFRMA ---
+    if missing_ma:
+        print(f"  ⚠️  Cannot calculate PFRMA — missing columns: {missing_ma}")
         buildings_result['PFRMA'] = 0
-
-    # PFRWB
-    cols_wb = [hazard_col_wb, exposure_col_wb, vulnerability_col]
-    missing_wb = [c for c in cols_wb if c not in buildings_result.columns]
-
-    if not missing_wb:
-        buildings_result['PFRWB'] = (
-            buildings_result[hazard_col_wb].fillna(0) ** weight_hazard *
-            buildings_result[exposure_col_wb].fillna(0) ** weight_exposure *
-            buildings_result[vulnerability_col].fillna(0) ** weight_vulnerability
-        )
     else:
-        buildings_result['PFRWB'] = 0
+        buildings_result['PFRMA'] = (
+            (vuln ** w_v) * (exp_ma ** w_e) * (haz_ma ** w_h)
+        )
+        pfrma_nonzero = (buildings_result['PFRMA'] > 0).sum()
+        pfrma_max = buildings_result['PFRMA'].max()
+        print(f"  ✅ PFRMA: {pfrma_nonzero}/{len(buildings_result)} buildings > 0, "
+              f"max={pfrma_max:.4f}")
 
-    nma = (buildings_result['PFRMA'] > 0).sum()
-    nwb = (buildings_result['PFRWB'] > 0).sum()
-    print(f"Risk: PFRMA>0 in {nma}/{len(buildings_result)}, "
-          f"PFRWB>0 in {nwb}/{len(buildings_result)}")
+    # --- Calculate PFRWB ---
+    if missing_wb:
+        print(f"  ⚠️  Cannot calculate PFRWB — missing columns: {missing_wb}")
+        buildings_result['PFRWB'] = 0
+    else:
+        buildings_result['PFRWB'] = (
+            (vuln ** w_v) * (exp_wb ** w_e) * (haz_wb ** w_h)
+        )
+        pfrwb_nonzero = (buildings_result['PFRWB'] > 0).sum()
+        pfrwb_max = buildings_result['PFRWB'].max()
+        print(f"  ✅ PFRWB: {pfrwb_nonzero}/{len(buildings_result)} buildings > 0, "
+              f"max={pfrwb_max:.4f}")
+
+    # --- Scale verification ---
+    if not normalize_exposure:
+        pfrwb_max_val = buildings_result['PFRWB'].max()
+        if pfrwb_max_val < 1.0 and pfrwb_max_val > 0:
+            print(f"\n  ⚠️  WARNING: PFRWB max is {pfrwb_max_val:.4f} (< 1.0)")
+            print(f"      This suggests exposure may still be normalized somewhere.")
+            print(f"      ArcGIS Hamburg values should reach ~10–28.")
+            print(f"      Check that R_G contains raw resident counts, not fractions.")
+        elif pfrwb_max_val > 1.0:
+            print(f"\n  ✅ PFRWB scale looks correct (max={pfrwb_max_val:.4f}, "
+                  f"in ArcGIS range)")
+
     return buildings_result
 
 
-def delaunay_smoothing(buildings_gdf, risk_col='PFRMA',
-                       n_iterations=3,
-                       max_neighbors=10,
-                       distance_threshold=100):
+def delaunay_smoothing(buildings_gdf, risk_col, n_iterations=3,
+                       distance_threshold=None, max_neighbors=None):
     """
-    Smooth risk values via Delaunay triangulation neighbor averaging.
-    Each iteration: blend 80% neighbor-weighted-avg + 20% original.
-    Weights = 1 / (distance + 1)^2.
-    """
-    if risk_col not in buildings_gdf.columns:
-        return pd.Series(0, index=buildings_gdf.index)
+    Smooth risk values using Delaunay triangulation and inverse-distance weighting.
 
+    Matches the ArcGIS smoothing formula:
+        newval[i] = (val[i] + sum(val[j]/dist[j]) / sum(1/dist[j])) / (n_neighbors + 1)
+
+    This averages the original value with the inverse-distance-weighted neighbor
+    average, then divides by (n_neighbors + 1).
+
+    Parameters
+    ----------
+    buildings_gdf : GeoDataFrame
+        Buildings with risk column.
+    risk_col : str
+        Column to smooth (e.g. 'PFRMA' or 'PFRWB').
+    n_iterations : int
+        Number of smoothing passes.
+    distance_threshold : float, optional
+        Maximum distance (meters) to consider neighbors. None = no limit (ArcGIS default).
+    max_neighbors : int, optional
+        Maximum number of neighbors per building. None = no limit (ArcGIS default).
+
+    Returns
+    -------
+    np.ndarray
+        Smoothed risk values.
+    """
+    values = buildings_gdf[risk_col].fillna(0).values.copy().astype(float)
+
+    # Track original NULLs to restore them
+    null_mask = buildings_gdf[risk_col].isna().values
+
+    # Get centroids
     centroids = buildings_gdf.geometry.centroid
-    coords = np.array([(p.x, p.y) for p in centroids])
-    values = buildings_gdf[risk_col].values.copy()
+    coords = np.array([[p.x, p.y] for p in centroids])
 
     if len(coords) < 4:
-        return pd.Series(values, index=buildings_gdf.index)
+        print(f"  Too few buildings ({len(coords)}) for Delaunay — skipping smoothing")
+        return values
 
+    # Build Delaunay triangulation
     try:
         tri = Delaunay(coords)
+    except Exception as e:
+        print(f"  Delaunay failed: {e} — skipping smoothing")
+        return values
 
-        # build neighbor graph from triangulation
-        neighbors = [set() for _ in range(len(coords))]
-        for simplex in tri.simplices:
-            for i in range(3):
-                for j in range(3):
-                    if i != j:
-                        neighbors[simplex[i]].add(simplex[j])
+    # Build adjacency from triangulation using sparse matrix (vectorized)
+    n = len(values)
+    rows, cols = [], []
+    for simplex in tri.simplices:
+        for i in range(3):
+            for j in range(i + 1, 3):
+                p1, p2 = simplex[i], simplex[j]
+                rows.extend([p1, p2])
+                cols.extend([p2, p1])
 
-        for iteration in range(n_iterations):
-            new_values = values.copy()
+    rows = np.array(rows)
+    cols = np.array(cols)
 
-            for i in range(len(coords)):
-                if not neighbors[i]:
-                    continue
+    # Compute distances
+    dists = np.sqrt(
+        (coords[rows, 0] - coords[cols, 0]) ** 2 +
+        (coords[rows, 1] - coords[cols, 1]) ** 2
+    )
 
-                nb_idx = list(neighbors[i])
-                if len(nb_idx) > max_neighbors:
-                    dists = cdist([coords[i]], coords[nb_idx])[0]
-                    closest = np.argsort(dists)[:max_neighbors]
-                    nb_idx = [nb_idx[k] for k in closest]
+    # Optional distance threshold
+    if distance_threshold is not None:
+        mask = dists <= distance_threshold
+        rows, cols, dists = rows[mask], cols[mask], dists[mask]
 
-                dists = cdist([coords[i]], coords[nb_idx])[0]
-                mask = dists < distance_threshold
-                if not np.any(mask):
-                    continue
+    # Weights = 1 / distance (matching ArcGIS: values[j] / distance[j])
+    inv_dists = 1.0 / (dists + 1e-10)
 
-                valid_nb = [nb_idx[j] for j in range(len(nb_idx)) if mask[j]]
-                valid_d = dists[mask]
+    # Build sparse weight matrix (1/distance)
+    W = sparse.coo_matrix((inv_dists, (rows, cols)), shape=(n, n)).tocsr()
 
-                w = 1.0 / (valid_d + 1) ** 2
-                w = w / w.sum()
+    # Limit to max_neighbors per building if specified
+    if max_neighbors is not None:
+        for i in range(n):
+            row_start = W.indptr[i]
+            row_end = W.indptr[i + 1]
+            nnz = row_end - row_start
+            if nnz > max_neighbors:
+                col_indices = W.indices[row_start:row_end]
+                row_dists = np.sqrt(
+                    (coords[col_indices, 0] - coords[i, 0]) ** 2 +
+                    (coords[col_indices, 1] - coords[i, 1]) ** 2
+                )
+                keep = np.argsort(row_dists)[:max_neighbors]
+                zero_mask = np.ones(nnz, dtype=bool)
+                zero_mask[keep] = False
+                W.data[row_start:row_end][zero_mask] = 0.0
+        W.eliminate_zeros()
 
-                smoothed = np.sum(w * values[valid_nb])
-                new_values[i] = 0.8 * smoothed + 0.2 * values[i]
+    # Count neighbors per building
+    n_neighbors = np.diff(W.indptr)  # number of non-zero entries per row
 
-            values = new_values
+    # Row-normalize W to get inverse-distance-weighted average
+    row_sums = np.array(W.sum(axis=1)).flatten()
+    has_neighbors = row_sums > 0
+    row_sums_safe = row_sums.copy()
+    row_sums_safe[row_sums_safe == 0] = 1
+    D_inv = sparse.diags(1.0 / row_sums_safe)
+    W_norm = D_inv @ W
 
-        return pd.Series(values, index=buildings_gdf.index)
+    # Iterative smoothing matching ArcGIS formula:
+    # newval[i] = (val[i] + weighted_avg_neighbors) / (n_neighbors + 1)
+    for iteration in range(n_iterations):
+        weighted_avg = W_norm @ values  # inverse-distance-weighted neighbor average
+        new_values = values.copy()
+        new_values[has_neighbors] = (
+            (values[has_neighbors] + weighted_avg[has_neighbors])
+            / (n_neighbors[has_neighbors] + 1)
+        )
+        values = new_values
 
-    except Exception:
-        return pd.Series(buildings_gdf[risk_col], index=buildings_gdf.index)
+    # Restore NULLs
+    values[null_mask] = np.nan
+
+    return values

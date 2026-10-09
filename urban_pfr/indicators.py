@@ -1,13 +1,10 @@
 """
-indicators.py – Social vulnerability via TOPSIS (Steps 1-4 from ArcGIS).
-  Step 1: Sensitivity    = TOPSIS(indicators, weights, entr=True)
-  Step 2: CopingCapacity = TOPSIS(indicators, weights, entr=True)
-  Step 3: SVI            = TOPSIS([Sen, CCap], weights, entr=False)
-  Step 4: SVPF           = (SVI + threshold * mean(SVI)) ^ transform
+Social vulnerability
 """
 
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 import math
 import warnings
 import logging
@@ -141,6 +138,12 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
     w_coping = tw.get('coping_capacity', None)
     w_svi = tw.get('svi', None)
 
+    # Entropy flags — ArcGIS uses entropy=true for all three steps
+    entropy_cfg = config.get('topsis_entropy', {}) or {}
+    entropy_sensitivity = entropy_cfg.get('sensitivity', True)
+    entropy_coping = entropy_cfg.get('coping_capacity', True)
+    entropy_svi = entropy_cfg.get('svi', True)
+
     svpf_threshold = config.get('svpf_threshold', 0.25)
     svpf_transform = config.get('svpf_transform', 2.0)
 
@@ -152,50 +155,141 @@ def compute_social_vulnerability(buildings_gdf, statistical_units_gdf=None,
         coping_fields = ['Y', 'L', 'MM']
     available_cop = [c for c in coping_fields if c in buildings_result.columns]
 
-    # Step 1: Sensitivity
-    if len(available_sen) >= 2:
-        scores, _ = topsis(buildings_result[available_sen].copy(),
-                           weights=w_sensitivity, use_entropy=True)
-        buildings_result['Sensitivity'] = scores
+    # Paper-replication path (Section 4.5 / 4.2): TOPSIS at stat-unit level on
+    # demographic percentages (count / Residents), then propagate to buildings.
+    # Default 'building' preserves the existing per-building behaviour.
+    topsis_granularity = config.get('topsis_granularity', 'building')
+    schema = config.get('schema', {}) or {}
+    stat_unit_col = schema.get('stat_unit_col', 'StatisticalUnit')
+    residents_col = schema.get('residents_col', 'Residents')
+
+    if topsis_granularity == 'stat_unit':
+        if stat_unit_col not in buildings_result.columns:
+            raise ValueError(
+                f"topsis_granularity='stat_unit' requires column '{stat_unit_col}' in buildings"
+            )
+        if residents_col not in buildings_result.columns:
+            raise ValueError(
+                f"topsis_granularity='stat_unit' requires column '{residents_col}' in buildings"
+            )
+
+        agg_cols = list(dict.fromkeys(available_sen + available_cop + [residents_col]))
+        su_table = buildings_result.groupby(stat_unit_col)[agg_cols].first().reset_index()
+        residents = su_table[residents_col].replace(0, np.nan)
+
+        pct_sen, pct_cop = [], []
+        for c in available_sen:
+            pc = f"{c}_pct"
+            su_table[pc] = su_table[c] / residents
+            pct_sen.append(pc)
+        for c in available_cop:
+            pc = f"{c}_pct"
+            su_table[pc] = su_table[c] / residents
+            pct_cop.append(pc)
+
+        # Step 1 at stat-unit level
+        if len(pct_sen) >= 2:
+            sen_su, _ = topsis(su_table[pct_sen].fillna(0).copy(),
+                               weights=w_sensitivity, use_entropy=entropy_sensitivity)
+        else:
+            sen_su = pd.Series(1.0, index=su_table.index)
+        su_table['Sensitivity'] = sen_su
+
+        # Step 2 at stat-unit level
+        if len(pct_cop) >= 2:
+            cop_su, _ = topsis(su_table[pct_cop].fillna(0).copy(),
+                               weights=w_coping, use_entropy=entropy_coping)
+        else:
+            cop_su = pd.Series(0.5, index=su_table.index)
+        su_table['CopingCapacity'] = cop_su
+
+        # Step 3: SVI at stat-unit level
+        svi_su, _ = topsis(
+            su_table[['CopingCapacity', 'Sensitivity']].copy(),
+            weights=w_svi, use_entropy=entropy_svi,
+        )
+        su_table['SVI'] = svi_su
+        su_table['SVPF'] = flood_susceptibility_transform(
+            su_table['SVI'].values,
+            threshold=svpf_threshold, transform=svpf_transform,
+        )
+
+        # Propagate stat-unit values to buildings
+        for col in ('Sensitivity', 'CopingCapacity', 'SVI', 'SVPF'):
+            mapping = dict(zip(su_table[stat_unit_col], su_table[col]))
+            buildings_result[col] = buildings_result[stat_unit_col].map(mapping)
+
+        print(
+            f"Sensitivity (stat-unit, {len(su_table)} units): "
+            f"median={su_table['Sensitivity'].median():.4f}"
+        )
     else:
-        buildings_result['Sensitivity'] = 1.0
+        # Step 1: Sensitivity (per-building)
+        if len(available_sen) >= 2:
+            scores, _ = topsis(buildings_result[available_sen].copy(),
+                               weights=w_sensitivity, use_entropy=entropy_sensitivity)
+            buildings_result['Sensitivity'] = scores
+        else:
+            buildings_result['Sensitivity'] = 1.0
 
-    # Step 2: Coping Capacity
-    if len(available_cop) >= 2:
-        scores, _ = topsis(buildings_result[available_cop].copy(),
-                           weights=w_coping, use_entropy=True)
-        buildings_result['CopingCapacity'] = scores
-    else:
-        buildings_result['CopingCapacity'] = 0.5
+        # Step 2: Coping Capacity (per-building)
+        if len(available_cop) >= 2:
+            scores, _ = topsis(buildings_result[available_cop].copy(),
+                               weights=w_coping, use_entropy=entropy_coping)
+            buildings_result['CopingCapacity'] = scores
+        else:
+            buildings_result['CopingCapacity'] = 0.5
 
-    # Step 3: SVI
-    svi_scores, _ = topsis(
-        buildings_result[['Sensitivity', 'CopingCapacity']].copy(),
-        weights=w_svi, use_entropy=False
-    )
-    buildings_result['SVI'] = svi_scores
+        # Step 3: SVI — ArcGIS uses [CopingCapacity, Sensitivity] order
+        svi_scores, _ = topsis(
+            buildings_result[['CopingCapacity', 'Sensitivity']].copy(),
+            weights=w_svi, use_entropy=entropy_svi
+        )
+        buildings_result['SVI'] = svi_scores
 
-    # Step 4: SVPF
-    buildings_result['SVPF'] = flood_susceptibility_transform(
-        buildings_result['SVI'].values,
-        threshold=svpf_threshold, transform=svpf_transform
-    )
+        # Step 4: SVPF
+        buildings_result['SVPF'] = flood_susceptibility_transform(
+            buildings_result['SVI'].values,
+            threshold=svpf_threshold, transform=svpf_transform
+        )
 
-    print(f"SVPF: range={buildings_result['SVPF'].min():.4f}-"
-          f"{buildings_result['SVPF'].max():.4f}, "
-          f"mean={buildings_result['SVPF'].mean():.4f}")
-
-    # aggregate to statistical units
+    # ── Aggregate to statistical units via sjoin + groupby ──
     stats_result = None
     if statistical_units_gdf is not None:
         stats_result = statistical_units_gdf.copy()
-        svpf_by_unit = {}
-        for idx, unit in stats_result.iterrows():
-            if unit.geometry is None or pd.isna(unit.geometry):
-                svpf_by_unit[idx] = 0
-                continue
-            in_unit = buildings_result[buildings_result.geometry.intersects(unit.geometry)]
-            svpf_by_unit[idx] = in_unit['SVPF'].mean() if len(in_unit) > 0 else 0
-        stats_result['svpf'] = pd.Series(svpf_by_unit)
+
+        # Aggregate all vulnerability indicators to statistical unit level
+        agg_cols = ['Sensitivity', 'CopingCapacity', 'SVI', 'SVPF']
+        available_agg = [c for c in agg_cols if c in buildings_result.columns]
+
+        bld_for_join = buildings_result[['geometry'] + available_agg].copy()
+        bld_for_join = bld_for_join.dropna(subset=available_agg, how='all')
+
+        if len(bld_for_join) > 0 and len(stats_result) > 0:
+            try:
+                joined = gpd.sjoin(
+                    bld_for_join,
+                    stats_result[['geometry']],
+                    how='inner',
+                    predicate='intersects',
+                )
+                for col in available_agg:
+                    agg = joined.groupby('index_right')[col].mean()
+                    stats_result[col] = stats_result.index.map(agg).fillna(0)
+            except Exception as e:
+                logger.warning(f"sjoin aggregation failed, using fallback: {e}")
+                for idx, unit in stats_result.iterrows():
+                    if unit.geometry is None or pd.isna(unit.geometry):
+                        for col in available_agg:
+                            stats_result.at[idx, col] = 0
+                        continue
+                    in_unit = buildings_result[
+                        buildings_result.geometry.intersects(unit.geometry)
+                    ]
+                    for col in available_agg:
+                        stats_result.at[idx, col] = in_unit[col].mean() if len(in_unit) > 0 else 0
+        else:
+            for col in available_agg:
+                stats_result[col] = 0
 
     return buildings_result, stats_result

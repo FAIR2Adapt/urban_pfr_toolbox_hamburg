@@ -1,0 +1,76 @@
+{
+  "name": "UrbanPluvialFloodRiskToolbox",
+  "label": "Urban Pluvial Flood Risk Toolbox",
+  "description": "A modular and configurable Python toolbox for urban pluvial flood risk assessment. Implements the IPCC risk framework (Risk = Hazard x Exposure x Vulnerability) to produce PFRMA and PFRWB risk indices. Accepts inputs as RO-Crate FAIR Digital Objects or as individual files/zips. Outputs HEALPix aggregated risk maps on the WGS84 ellipsoid.",
+  "type": "DataAnalysing",
+  "dockerImage": "urban-pluvial-flood-risk-toolbox",
+  "parameters": [],
+  "inputs": [
+    {
+      "name": "buildings",
+      "type": "Directory",
+      "label": "Buildings RO-Crate",
+      "path": "/mnt/inputs/buildings",
+      "description": "RO-Crate containing building footprints with demographic attributes (FlatGeobuf or GeoPackage). Columns described via variableMeasured with I-ADOPT propertyID."
+    },
+    {
+      "name": "streets",
+      "type": "Directory",
+      "label": "Streets RO-Crate",
+      "path": "/mnt/inputs/streets",
+      "description": "RO-Crate containing street network outlines (FlatGeobuf or GeoPackage)."
+    },
+    {
+      "name": "floodlevels",
+      "type": "Directory",
+      "label": "Flood Levels RO-Crate",
+      "path": "/mnt/inputs/floodlevels",
+      "description": "RO-Crate containing flood extent polygons at multiple depth thresholds (Flood_30 through Flood_100)."
+    },
+    {
+      "name": "config",
+      "type": "Directory",
+      "label": "Configuration RO-Crate",
+      "path": "/mnt/inputs/config",
+      "description": "RO-Crate containing the YAML configuration file with CRS, hazard parameters, TOPSIS weights, and visualization settings."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "outputs",
+      "type": "Directory",
+      "path": "/mnt/outputs",
+      "label": "Output Workflow Run Crate",
+      "description": "RO-Crate containing HEALPix risk maps (FlatGeobuf), vulnerability layers, publication maps, and provenance metadata."
+    }
+  ],
+  "resources": {
+    "cores": 8,
+    "memory": 8192,
+    "gpuNeeded": false,
+    "gpuMemory": 0,
+    "estimatedTime": 1
+  },
+  "tags": [
+    "risk",
+    "flood",
+    "urban",
+    "pluvial",
+    "FAIR",
+    "RO-Crate",
+    "HEALPix",
+    "IPCC"
+  ],
+  "license": "MIT",
+  "version": "2.0.0",
+  "dependencies": [],
+  "publicationDate": "2026-03-28",
+  "author": "FAIR2Adapt",
+  "bugs": {
+    "email": "https://helpdesk.lifewatch.eu/",
+    "url": "https://github.com/FAIR2Adapt/urban_pfr_toolbox_hamburg/issues"
+  },
+  "citation": "von Szombathely et al. (2025). Urban Pluvial Flood Risk Mapping: A High-Resolution Assessment for the City of Hamburg.",
+  "testPath": "emptyUnitTest.sh",
+  "metaDataCatalogueUrl": "Available very soon"
+}

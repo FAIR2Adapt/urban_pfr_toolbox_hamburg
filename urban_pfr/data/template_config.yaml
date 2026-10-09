@@ -1,0 +1,62 @@
+# Copy this file, rename to config_[city].yaml.
+
+# Local users:  pass the path as argument: urban-pfr local myconfig.yaml
+
+project:
+  city_name: "YourCity"
+  crs: "EPSG:25832"                    
+
+  paths:
+    input_gdb: "path/to/your/data.gdb"
+    flood_dir: "path/to/Floodlevels"
+    output_dir: "./outputs"
+
+# Paper-replication (Section 4.5): TOPSIS on stat-unit demographic percentages
+#set to Default 'building' preserves the per-building behaviour
+topsis_granularity: stat_unit
+
+schema:
+  buildings_layer: null
+  stats_layer: null
+  streets_layer: null
+  stat_unit_col: "StatisticalUnit"
+  residents_col: "Residents"
+  living_area_col: "LivingArea"
+  floors_col: "Floors"
+  building_type_col: "Building_type"
+  sensitivity_fields: ["ES", "C"]      # elderly singles (w=0.7) + children (w=0.3)
+  coping_fields: ["WR", "EDQ"]         # welfare (0.5) + education (0.5)
+hazard_settings:
+  hma_buffers: [5, 15, 30]
+  hwb_buffer: 2
+  flood_depths: [30, 40, 50, 60, 70, 80, 90, 100]
+  flood_threshold: 0.3
+  shape_param: 0.25
+  min_area_threshold: 0.0
+  hwb_clip_max: null      # hwb_clip_max=null : paper Eq.2 (unclipped, max ~9), 
+                          # hwb_clip_max=1.0 to match paper public figs
+
+
+risk_settings:
+  weight_hazard: 1.0
+  weight_exposure: 1.0
+  weight_vulnerability: 1.0
+  smoothing_iterations: 3
+  max_neighbors: 10
+  distance_threshold: 100
+  n_classes: 5
+
+topsis_weights:
+  sensitivity: [0.7, 0.3]
+  coping_capacity: [0.5, 0.5]
+  svi: [0.5, 0.5]
+
+svpf_threshold: 0.25
+svpf_transform: 2.0
+
+visualization:
+  figsize: [24, 8]
+  dpi: 300
+  colors:
+    pfrma: ["#F5F5F5", "#FFF2CC", "#FFE599", "#FFD966", "#FF9900", "#CC7A00"]
+    pfrwb: ["#F5F5F5", "#E6E6FA", "#DDA0DD", "#BA55D3", "#8B44AD", "#663399"]
